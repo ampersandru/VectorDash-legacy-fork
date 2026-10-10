@@ -49,7 +49,11 @@ with patch.object(window,'request_search'):
     window.quick.summon()
     window.quick.results.populate([photo,note]);QTest.qWait(30)
     assert window.quick.preview.current and not window.quick.preview.current.picture.pixmap().isNull()
-    window.quick.grab().save(str(home/'quick-preview.png'))
+    popup=window.quick.grab()
+    popup.save(str(home/'quick-preview.png'))
+    assert popup.toImage().pixelColor(0,0).alpha()==0
+    border=popup.toImage().pixelColor(3,popup.height()//2)
+    assert border.blue()>border.red() and border.alpha()>200, border.name()
     quick_preview=window.quick.preview.current
     window.quick.hide();QTest.qWait(30)
     assert quick_preview.released and window.quick.preview.current is None
@@ -61,10 +65,15 @@ for key,name in [('server','llama-server.exe'),('model','embeddinggemma-2-Q8_0.g
 for key in ('ocr','projector','ffmpeg'):window.setup_choices[key].setChecked(False)
 window.update_tool_state()
 assert window.setup_button.text()=='Start'
+assert window.setup_cancel.isHidden()
+window.installing=True;window.update_tool_state();assert not window.setup_cancel.isHidden()
+window.installing=False;window.update_tool_state()
 assert '#aa7900' in window.component_status['model'].styleSheet()
 assert window.component_status['model'].alignment() & Qt.AlignmentFlag.AlignRight
 window.model_status('loaded · text: ready')
 assert '#16834a' in window.component_status['model'].styleSheet()
+assert not window.setup_button.isEnabled()
+assert 'indexed files' in window.index_count.text()
 assert '#c73545' in window.component_status['projector'].styleSheet()
 with patch.object(window,'start_model') as start,patch.object(window,'refresh_component_status'),patch('desktop.catalogs') as catalogs:
     window.setup_all();start.assert_called_once();catalogs.assert_not_called()

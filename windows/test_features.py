@@ -120,6 +120,29 @@ class FeatureTests(unittest.TestCase):
             exact=engine.search('E_PAYMENT_402',settings)
             self.assertEqual(Path(exact[0].path).name,'error.png')
 
+    def test_query_embedding_is_reused_and_index_cache_invalidates(self):
+        settings=dict(DEFAULTS,semantic=True,model=str(self.home/'model.gguf'))
+        Path(settings['model']).write_bytes(b'model')
+        engine=Engine(self.home)
+        with engine.connect() as db:
+            db.execute("INSERT INTO metadata VALUES('signature',?)",(model_signature(settings),))
+            db.execute('INSERT INTO segments VALUES(?,?,?,?,?,?)',('first.txt','files','text','first','[1,0]','{}'))
+            db.execute('INSERT INTO words(rowid,path,text) SELECT rowid,path,text FROM segments')
+        with patch('engine.verify_server_model'),patch('engine.embed',return_value=[1,0]) as embed:
+            self.assertEqual(engine.search('test subject',settings)[0].path,'first.txt')
+            engine.search('test subject',settings)
+            embed.assert_called_once()
+            with engine.connect() as db:
+                db.execute('DELETE FROM segments')
+                db.execute('INSERT INTO segments VALUES(?,?,?,?,?,?)',('second.txt','files','text','second','[1,0]','{}'))
+                db.execute('DELETE FROM words')
+                db.execute('INSERT INTO words(rowid,path,text) SELECT rowid,path,text FROM segments')
+            self.assertEqual(engine.search('test subject',settings)[0].path,'second.txt')
+            engine.clear_query_cache()
+            engine.search('test subject',settings)
+            self.assertEqual(embed.call_count,2)
+        self.assertEqual(engine.indexed_file_count(),1)
+
     def test_shutdown_blocks_new_helpers(self):
         process_lifecycle.close()
         with patch('process_lifecycle.subprocess.Popen') as spawn:

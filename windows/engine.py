@@ -1,6 +1,8 @@
 """Persistent settings, incremental index, and search shared by the desktop UI."""
 from contextlib import contextmanager
 from dataclasses import dataclass
+import numpy as np
+from collections import OrderedDict
 import re
 import shutil
 import logging
@@ -117,6 +119,9 @@ class Engine:
         self.paused = threading.Event()
         self.inference = threading.Lock()
         self.query_waiting = threading.Event()
+        self.search_cache_lock=threading.RLock()
+        self.search_cache={}
+        self.query_vectors=OrderedDict()
         with self.connect() as db:
             db.execute('PRAGMA journal_mode=WAL')
             db.execute('CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, text TEXT, vector TEXT)')
@@ -132,6 +137,43 @@ class Engine:
             if not db.execute('SELECT 1 FROM segments LIMIT 1').fetchone():
                 db.execute("INSERT INTO segments SELECT path,'files','text',text,vector,'{}' FROM files")
                 db.execute('INSERT INTO words(rowid,path,text) SELECT rowid,path,text FROM segments')
+
+    def indexed_file_count(self):
+        with self.connect() as db:
+            return db.execute('SELECT count(DISTINCT path) FROM segments').fetchone()[0]
+
+    def cached_index(self,namespace):
+        with self.search_cache_lock:
+            # Include WAL changes as well as checkpointed database changes.
+            version=tuple((path.stat().st_mtime_ns,path.stat().st_size) if path.exists() else None for path in (self.db,Path(str(self.db)+'-wal')))
+            key=(version,namespace)
+            if key in self.search_cache:
+                return self.search_cache[key]
+            with self.connect() as db:
+                db.execute('BEGIN')
+                metadata=dict(db.execute('SELECT key,value FROM metadata'))
+                rows=list(db.execute('SELECT rowid,path,kind,text,vector,location FROM segments WHERE namespace=?',(namespace,)))
+            records=[]
+            groups={}
+            for i,(rowid,path,kind,text,stored,location) in enumerate(rows):
+                vector=json.loads(stored)
+                if vector:
+                    groups.setdefault(len(vector),[]).append((i,vector))
+                records.append((rowid,path,kind,text,(path+'\n'+text).casefold(),location))
+            matrices={}
+            for dimension,entries in groups.items():
+                matrix=np.asarray([vector for i,vector in entries],dtype=np.float32)
+                norms=np.linalg.norm(matrix,axis=1,keepdims=True)
+                matrix/=np.maximum(norms,1e-30)
+                matrices[dimension]=([i for i,vector in entries],matrix)
+            value=(records,matrices,metadata)
+            self.search_cache={k:v for k,v in self.search_cache.items() if k[0]==version}
+            self.search_cache[key]=value
+            return value
+
+    def clear_query_cache(self):
+        with self.search_cache_lock:
+            self.query_vectors.clear()
 
     @contextmanager
     def connect(self):
@@ -301,6 +343,7 @@ class Engine:
         return result
 
     def search(self, query, settings):
+        started=time.perf_counter()
         query=query.strip()
         if not query:
             return []
@@ -311,21 +354,27 @@ class Engine:
             query=query[5:].strip()
             if not query:
                 return []
+        records,matrices,metadata=self.cached_index('code' if code else 'files')
         vector=[]
         if settings['semantic']:
             verify_server_model(settings)
-            with self.connect() as db:
-                signature=dict(db.execute('SELECT key,value FROM metadata')).get('signature')
+            signature=metadata.get('signature')
             if signature!=model_signature(settings):
                 raise ValueError('Rebuild the index with the selected model and encoder before semantic search.')
-            self.query_waiting.set()
-            try:
-                with self.inference:
-                    subject=re.sub(r'^(?:images?|photos?|pictures?)\s+(?:of\s+)?','',query,flags=re.I).strip() or query
-                    prompt=('task: code retrieval | query: ' if code else 'task: search result | query: ')+subject
-                    vector=embed(prompt,request=lambda text:embedding_request(text,settings)) if settings.get('server_mode')=='Remote' else embed(prompt)
-            finally:
-                self.query_waiting.clear()
+            subject=re.sub(r'^(?:images?|photos?|pictures?)\s+(?:of\s+)?','',query,flags=re.I).strip() or query
+            prompt=('task: code retrieval | query: ' if code else 'task: search result | query: ')+subject
+            cache_key=(signature,server_url(settings),prompt)
+            vector=self.query_vectors.get(cache_key)
+            if vector is None:
+                self.query_waiting.set()
+                try:
+                    with self.inference:
+                        vector=embed(prompt,request=lambda text:embedding_request(text,settings)) if settings.get('server_mode')=='Remote' else embed(prompt)
+                        self.query_vectors[cache_key]=vector
+                        if len(self.query_vectors)>64:
+                            self.query_vectors.popitem(last=False)
+                finally:
+                    self.query_waiting.clear()
         tokens=re.findall(r'[\w]+(?:[-./:][\w]+)*',query.casefold())
         stop={'a','an','the','in','on','at','of','to','and','or','where','they','about','find','shows','show','me','with','is','it'}
         tokens=[token for token in tokens if token not in stop] or tokens
@@ -335,18 +384,25 @@ class Engine:
             tokens=subjects
         if not tokens:
             return []
+        scores=np.zeros(len(records),dtype=np.float32)
+        if vector and len(vector) in matrices:
+            indices,matrix=matrices[len(vector)]
+            query_vector=np.asarray(vector,dtype=np.float32)
+            query_vector/=max(float(np.linalg.norm(query_vector)),1e-30)
+            scores[indices]=matrix@query_vector
+        token_patterns=[re.compile(r'(?<!\w)'+re.escape(token)+r'(?!\w)') for token in tokens]
+        identifier=bool(re.search(r'\d|[_:/-]',query))
+        lowered=query.casefold()
         results=[]
         with self.connect() as db:
             # FTS handles Unicode token boundaries; literal scoring additionally retains punctuation in IDs.
             expression=' OR '.join('"'+token.replace('"','""')+'"' for token in tokens)
             exact={row[0] for row in db.execute('SELECT rowid FROM words WHERE words MATCH ?', (expression,))}
-            for rowid,path,kind,text,stored,location in db.execute('SELECT rowid,path,kind,text,vector,location FROM segments WHERE namespace=?',('code' if code else 'files',)):
-                haystack=(path+'\n'+text).casefold()
-                matches=sum(bool(re.search(r'(?<!\w)'+re.escape(token)+r'(?!\w)',haystack)) for token in tokens)
+            for index,(rowid,path,kind,text,haystack,location) in enumerate(records):
+                matches=sum(bool(pattern.search(haystack)) for pattern in token_patterns)
                 literal=query.casefold() in haystack
                 lexical=matches/len(tokens)
-                semantic=cosine(vector,json.loads(stored)) if vector else 0
-                identifier=bool(re.search(r'\d|[_:/-]',query))
+                semantic=float(scores[index]) if vector else 0
                 score=((2 if identifier else .65) if literal else 0)+((.35 if identifier else .15)*lexical if vector else lexical)+(.05 if rowid in exact else 0)+semantic
                 lowered=query.casefold()
                 if vector:
@@ -376,4 +432,5 @@ class Engine:
             selected.append(result)
             if len(selected)==100:
                 break
+        logging.getLogger('vectordash').debug('Search completed in %.1f ms: %d results from %d segments',(time.perf_counter()-started)*1000,len(selected),len(records))
         return selected

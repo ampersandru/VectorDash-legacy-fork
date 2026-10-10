@@ -16,7 +16,7 @@ import threading
 import time
 import urllib.request
 import psutil
-from PySide6.QtCore import Qt, QObject, Signal, QTimer, QTime, QAbstractNativeEventFilter, QFileInfo, QEvent
+from PySide6.QtCore import Qt, QObject, Signal, QTimer, QTime, QAbstractNativeEventFilter, QFileInfo, QEvent, QRectF
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut, QCursor, QPainter, QColor, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QStackedWidget, QComboBox, QCheckBox, QSpinBox, QTimeEdit, QFileDialog, QMessageBox, QFrame, QSystemTrayIcon, QMenu, QProgressBar, QScrollArea, QFileIconProvider, QAbstractItemView, QPlainTextEdit, QSplitter)
@@ -189,6 +189,8 @@ class QuickSearch(QWidget):
         self.setWindowTitle('VectorDash Quick Search')
         self.setWindowIcon(owner.windowIcon())
         self.setObjectName('quickSearch')
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
         self.resize(1060,570)
         layout=QVBoxLayout(self)
         layout.setContentsMargins(20,20,20,16)
@@ -207,11 +209,19 @@ class QuickSearch(QWidget):
         layout.addWidget(self.hint)
         self.timer=QTimer(self)
         self.timer.setSingleShot(True)
-        self.timer.setInterval(300)
+        self.timer.setInterval(120)
         self.timer.timeout.connect(lambda:owner.request_search(self.input.text()))
         self.input.textChanged.connect(lambda:self.changed())
         self.input.returnPressed.connect(lambda:owner.open_file(self.results.selected_result()) if self.results.count() else owner.request_search(self.input.text()))
         QShortcut(QKeySequence('Escape'),self,activated=self.hide)
+    def paintEvent(self,event):
+        painter=QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        dark=self.owner.settings['theme']=='Dark' or (self.owner.settings['theme']=='System' and QApplication.styleHints().colorScheme()==Qt.ColorScheme.Dark)
+        painter.setBrush(QColor('#20212c' if dark else '#ffffff'))
+        painter.setPen(QPen(QColor('#8573ff'),5))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(3,3,-3,-3),20,20)
+
     def hideEvent(self,event):
         self.preview.clear()
         super().hideEvent(event)
@@ -255,6 +265,7 @@ class Desktop(QMainWindow):
         process_lifecycle.reopen()
         self.settings=settings.values
         self.settings['semantic']=True
+        self.model_generation=0
         self.model_loaded=False
         self.loaded_modalities={}
         self.tool_ready={}
@@ -310,6 +321,7 @@ class Desktop(QMainWindow):
         self.events.metrics.connect(self.metrics_finished)
         self.events.model.connect(self.model_status)
         self.build()
+        self.launch(self.warm_search_cache)
         self.quick=QuickSearch(self)
         self.hotkey=GlobalHotkey()
         self.hotkey_filter=HotkeyFilter(self.toggle_quick)
@@ -359,6 +371,14 @@ class Desktop(QMainWindow):
 
     def launch(self, work):
         threading.Thread(target=work,daemon=True).start()
+
+    def warm_search_cache(self):
+        try:
+            self.engine.cached_index('files')
+            if self.settings.get('code_enabled'):
+                self.engine.cached_index('code')
+        except Exception as error:
+            self.logger.debug('Search cache warm-up: %s',error)
 
     def build(self):
         central=QWidget()
@@ -467,7 +487,7 @@ class Desktop(QMainWindow):
         self.stack.addWidget(page)
         self.search_timer=QTimer(self)
         self.search_timer.setSingleShot(True)
-        self.search_timer.setInterval(300)
+        self.search_timer.setInterval(120)
         self.search_timer.timeout.connect(lambda:self.request_search(self.query.text()))
         self.query.textChanged.connect(self.query_changed)
         self.query.returnPressed.connect(lambda:self.open_file(self.results.selected_result()) if self.results.count() else self.request_search(self.query.text()))
@@ -475,6 +495,8 @@ class Desktop(QMainWindow):
     def sources_page(self):
         layout=self.page('Your sources','Choose the drives and folders VectorDash can read.')
         frame,inside=card('Index status','Pause keeps your progress. Cancel keeps the previous completed index.')
+        self.index_count=label(f'{self.engine.indexed_file_count():,} indexed files','cardTitle')
+        inside.addWidget(self.index_count)
         self.source_status=label('Ready','muted')
         self.source_progress=QProgressBar()
         self.source_progress.setValue(0)
@@ -523,7 +545,7 @@ class Desktop(QMainWindow):
 
     def models_page(self):
         layout=self.page('Models & hardware','Choose the features you want, then start your local or remote model.')
-        frame,inside=card('One-click setup','Downloads and installs the selected runtime, model, encoder, OCR language packs and media decoder. Choose hardware and quantization below first.')
+        frame,inside=card('Status','Downloads and installs the selected runtime, model, encoder, OCR language packs and media decoder. Choose hardware and quantization below first.')
         self.setup_progress=QProgressBar()
         self.setup_progress.setValue(0)
         inside.addWidget(self.setup_progress)
@@ -541,7 +563,10 @@ class Desktop(QMainWindow):
             inside.addWidget(row(choice,status))
             choice.toggled.connect(self.update_tool_state)
         self.setup_button=button('Download, install and start',self.setup_all,True)
-        inside.addWidget(row(self.setup_button,button('Refresh status',self.refresh_component_status),button('Cancel setup',self.download_cancel.set)))
+        self.setup_stop=button('Stop',self.stop_model)
+        self.setup_cancel=button('Cancel setup',self.download_cancel.set)
+        self.setup_cancel.hide()
+        inside.addWidget(row(self.setup_button,self.setup_stop,button('Refresh status',self.refresh_component_status),self.setup_cancel))
         layout.addWidget(frame)
         frame,inside=card('Server connection','Remote mode sends indexed content and search queries to your chosen server.')
         self.field(inside,'server_mode','Embedding server','combo',['Local','Remote'])
@@ -779,6 +804,7 @@ class Desktop(QMainWindow):
             QPushButton:hover {{background: {hover};}}
             QPushButton#primary {{background: #6757e8; color: white; border-color: #6757e8;}}
             QPushButton#primary:hover {{background: #7868f2;}}
+            QPushButton:disabled, QPushButton#primary:disabled {{background: {border}; color: {muted}; border-color: {border};}}
             QLineEdit, QComboBox, QSpinBox, QTimeEdit {{background: {surface}; border: 1px solid {border}; border-radius: 7px; padding: 8px; selection-background-color: #6757e8;}}
             QLineEdit:focus {{border-color: #8573ff;}}
             QComboBox QAbstractItemView {{background: {surface}; color: {text}; selection-background-color: {hover}; border: 1px solid {border};}}
@@ -794,7 +820,7 @@ class Desktop(QMainWindow):
             #results::item:selected {{border-color: #8573ff; background: {hover};}}
             #resultTitle {{font-weight: 600; font-size: 14px;}}
             #snippet {{color: {muted}; font-size: 12px;}}
-            #quickSearch {{background: {surface}; border: 2px solid #8573ff; border-radius: 14px;}}
+            #quickSearch {{background: transparent; border: none;}}
             QCheckBox {{spacing: 8px; padding: 3px;}}
             QCheckBox::indicator {{width: 16px; height: 16px; border: 1px solid {border}; border-radius: 4px; background: {surface};}}
             QCheckBox::indicator:checked {{background: #6757e8; border-color: #6757e8; image: url("{tick_icon}");}}
@@ -908,6 +934,9 @@ class Desktop(QMainWindow):
         self.source_progress.setRange(0,100)
         self.source_progress.setValue(100 if success else 0)
         self.source_status.setText(message)
+        self.index_count.setText(f'{self.engine.indexed_file_count():,} indexed files')
+        if success:
+            self.launch(self.warm_search_cache)
         self.automatic_active=False
         self.engine.paused.clear()
         self.index_status.setText(message)
@@ -1115,6 +1144,20 @@ class Desktop(QMainWindow):
             self.model_status(f'Model process exited ({code}). See model.log for details.')
 
     def stop_model(self):
+        self.model_generation+=1
+        if self.indexing:
+            self.engine.cancel.set()
+        self.engine.clear_query_cache()
+        if self.attached_server:
+            try:
+                self.attached_server.terminate()
+                self.attached_server.wait(timeout=3)
+            except psutil.TimeoutExpired:
+                try: self.attached_server.kill()
+                except psutil.Error: pass
+            except psutil.Error:
+                pass
+            self.attached_server=None
         process=self.model_process
         self.model_process=None
         if process and process.poll() is None:
@@ -1232,6 +1275,10 @@ class Desktop(QMainWindow):
         selected=[key for key,choice in self.setup_choices.items() if choice.isChecked()]
         ready=all(self.component_installed(key) for key in set(selected)|{'server','model'})
         self.setup_button.setText('Start' if ready else 'Download, install and start')
+        loaded=ready and self.model_loaded and all(('Loaded' if key in ('server','model','projector') else 'Ready')==self.component_status[key].text() for key in selected)
+        self.setup_button.setEnabled(not self.installing and not loaded)
+        self.setup_stop.setEnabled(self.settings.get('server_mode')!='Remote' and (self.model_loaded or bool(self.model_process) or bool(self.attached_server)))
+        self.setup_cancel.setVisible(self.installing)
         if hasattr(self,'tool_state'):
             self.tool_state.setText('OCR: '+self.component_status['ocr'].text()+' · Media decoder: '+self.component_status['ffmpeg'].text())
 
@@ -1272,6 +1319,7 @@ class Desktop(QMainWindow):
         snapshot=dict(self.settings)
         self.download_cancel.clear()
         self.installing=True
+        self.update_tool_state()
         self.download_bar.setValue(0)
         self.set_status('Setting up '+('OCR and selected languages' if key=='ocr' else 'included FFmpeg'))
         def work():
@@ -1295,6 +1343,7 @@ class Desktop(QMainWindow):
         device=self.devices.currentData() or ''
         self.download_cancel.clear()
         self.installing=True
+        self.update_tool_state()
         self.download_bar.setValue(0)
         self.set_status('Preparing '+('vision/audio encoder' if key=='projector' else 'download'))
         def work():
@@ -1333,6 +1382,7 @@ class Desktop(QMainWindow):
 
     def install_finished(self,key,path,error):
         self.installing=False
+        self.update_tool_state()
         if error:
             self.set_status(error)
             return
@@ -1389,6 +1439,7 @@ class Desktop(QMainWindow):
         runtime_index=self.runtime_choice.currentIndex()
         selected=self.runtimes[runtime_index] if 0<=runtime_index<len(self.runtimes) else None
         self.installing=True
+        self.update_tool_state()
         self.download_cancel.clear()
         self.set_status('Preparing one-click setup…')
         def work():
@@ -1439,6 +1490,7 @@ class Desktop(QMainWindow):
         if self.probing_model or self.shutting_down:
             return
         self.probing_model=True
+        generation=self.model_generation
         snapshot=dict(self.settings,semantic=True)
         def work():
             try:
@@ -1454,7 +1506,7 @@ class Desktop(QMainWindow):
                 message='not loaded · '+(str(error) if isinstance(error,ValueError) else 'Start the local model or check the server connection.')
             finally:
                 self.probing_model=False
-            if not self.shutting_down:
+            if not self.shutting_down and generation==self.model_generation:
                 if snapshot.get('server_mode')!='Remote' and message.startswith('loaded'):
                     self.attach_local_server()
                 self.events.model.emit(message)

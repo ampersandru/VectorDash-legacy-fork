@@ -161,7 +161,7 @@ own licenses.
 
 ## Guided setup, connection status and logs
 
-The first card in **Models & hardware** is **One-click setup**. Choose hardware
+The first card in **Models & hardware** is **Status**. Choose hardware
 and quantization below it, then click **Download, install and start**. It installs
 missing llama-server, the selected EmbeddingGemma 2 GGUF and matching encoder,
 managed FFmpeg, and (when enabled) Tesseract plus your chosen OCR languages.
@@ -215,3 +215,16 @@ rebuild** once to add the missing image/audio/text embeddings. Picture queries
 such as “images of dogs” match the subject; generic words describing file types
 do not add lexical score when another subject is present. Exact IDs and error
 codes retain their stronger literal-match score.
+
+
+Search uses SQLite with FTS5 and a cached, normalized NumPy vector matrix. Index
+commits invalidate the cache, and repeated queries reuse their model embeddings.
+The typing delay is 120 ms. Verbose logs report search duration; new semantic
+queries still need model inference, and indexing can hold inference until the
+current segment finishes. The 1,500-file / 768-dimension synthetic benchmark
+improved warm comparison time from about 370 ms to 6–8 ms, excluding inference.
+
+The popup has a rounded, bold purple border. Sources shows the committed indexed
+file count. Status disables Start when the selected features are ready, offers
+Stop to unload the local model and its encoder, and shows Cancel only during
+setup. Remote models are managed on their host.
