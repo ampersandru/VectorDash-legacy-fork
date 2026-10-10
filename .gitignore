@@ -19,3 +19,6 @@ __pycache__/
 evals/*.local.json
 
 .DS_Store
+
+# Windows Python app
+windows/__pycache__/
