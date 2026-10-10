@@ -11,6 +11,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import urllib.request
+import urllib.error
 import zipfile
 import xml.etree.ElementTree as ET
 
@@ -41,7 +42,7 @@ def cosine(a, b):
     return sum(x*y for x,y in zip(a,b)) / norm if norm else 0
 
 def command(settings):
-    args = [settings['server'], '-m', settings['model'], '--embedding', '--host', '127.0.0.1', '--port', '8787', '-c', '2048']
+    args = [settings['server'], '-m', settings['model'], '--embedding', '--host', '127.0.0.1', '--port', '8787', '-c', '2048', '--batch-size', '2048', '--ubatch-size', '2048', '--parallel', '1']
     if settings['mode'] == 'CPU / system RAM':
         args += ['--device', 'none', '--gpu-layers', '0']
     else:
@@ -50,10 +51,54 @@ def command(settings):
         args += ['--device', settings['device'], '--gpu-layers', 'all']
     return args
 
+def embedding_request(text):
+    request = urllib.request.Request('http://127.0.0.1:8787/v1/embeddings', data=json.dumps({'input': text}).encode(), headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            vector = json.load(response)['data'][0]['embedding']
+        if not vector or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in vector):
+            raise RuntimeError('Model returned an invalid embedding')
+        return vector
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode('utf-8', errors='replace')[:2000]
+        # Only input-size failures can be recovered by splitting. Other server
+        # failures must remain visible and preserve the previous index.
+        lower = detail.lower()
+        if error.code in (400, 500) and any(term in lower for term in
+                ('too large', 'too long', 'batch size', 'context size', 'context length', 'exceeds')):
+            raise InputTooLarge(detail) from error
+        raise RuntimeError(f'Model HTTP {error.code}: {detail or error.reason}') from error
+
+
+class InputTooLarge(RuntimeError):
+    pass
+
+
 def embed(text):
-    request = urllib.request.Request('http://127.0.0.1:8787/v1/embeddings', data=json.dumps({'input': text[:6000]}).encode(), headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return json.load(response)['data'][0]['embedding']
+    """Embed all bounded extracted text, splitting oversized model requests.
+
+    Character counts cannot predict token counts, especially for code and
+    multilingual text. Let the runtime reject an oversized chunk, then bisect
+    it without discarding any content. Pool the successful chunk vectors.
+    """
+    pending = [text[i:i+6000] for i in range(0, len(text), 6000)] or ['']
+    vectors = []
+    while pending:
+        chunk = pending.pop()
+        try:
+            vectors.append((embedding_request(chunk), max(1, len(chunk))))
+        except InputTooLarge:
+            if len(chunk) <= 1:
+                raise RuntimeError('Model cannot embed a minimal input; check its context/batch configuration')
+            midpoint = len(chunk) // 2
+            pending.extend((chunk[:midpoint], chunk[midpoint:]))
+    dimensions = len(vectors[0][0])
+    if any(len(vector) != dimensions for vector, _ in vectors):
+        raise RuntimeError('Model embedding dimensions changed during indexing')
+    total = sum(weight for _, weight in vectors)
+    pooled = [sum(vector[i] * weight for vector, weight in vectors) / total for i in range(dimensions)]
+    norm = math.sqrt(sum(x*x for x in pooled))
+    return [x / norm for x in pooled] if norm else pooled
 
 class App:
     def __init__(self, root):
@@ -189,7 +234,7 @@ class App:
                                     try:
                                         vector = embed(path.name + '\n' + text)
                                     except Exception as error:
-                                        raise RuntimeError('Embedding failed; previous index retained: ' + str(error)) from error
+                                        raise RuntimeError(f'Embedding failed for {path.name}; previous index retained: {error}') from error
                                 db.execute('INSERT OR REPLACE INTO replacement VALUES(?,?,?)', (str(path), text, json.dumps(vector)))
                                 count += 1
                                 if count % 50 == 0:
@@ -268,6 +313,13 @@ class App:
     def stop(self):
         if self.process and self.process.poll() is None:
             self.process.terminate()
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        if hasattr(self, 'log'):
+            self.log.close()
         self.status.set('Model stopped')
 
     def poll(self):

@@ -49,3 +49,15 @@ Tests: `python -m unittest discover -s windows -v`.
 
 Source pulled from https://github.com/ARahim3/DigUp on branch windows-11.
 GitHub fork: https://github.com/ampersandru/DigUp (Windows work on windows-11).
+
+## Embedding input-size fix
+
+The launcher now sets context, logical batch and physical batch to 2048,
+with one server slot. Oversized inputs are split and their vectors pooled,
+including when connected to an older server still using a 512-token batch.
+All extracted text up to the existing 32,000-character extraction bound is
+considered, rather than silently cutting embedding input at 6,000 characters.
+Other HTTP errors report the server response and preserve the previous index.
+
+After updating: close and reopen DigUp, stop/start the local model, then
+Rebuild index. Existing settings and source selections are retained.
