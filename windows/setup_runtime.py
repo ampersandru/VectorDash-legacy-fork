@@ -96,13 +96,16 @@ def download(url, destination, size, checksum, cancel, progress):
     if size and partial.stat().st_size != size:
         raise RuntimeError('Incomplete download; retry to resume.')
     if checksum:
-        digest=hashlib.sha256()
+        git_hash=checksum.startswith('git-sha1:')
+        digest=hashlib.sha1() if git_hash else hashlib.sha256()
+        if git_hash:
+            digest.update(b'blob '+str(partial.stat().st_size).encode()+b'\0')
         with partial.open('rb') as stream:
             while chunk:=stream.read(1024*1024):
                 if cancel.is_set():
                     raise InterruptedError('Verification cancelled; partial file retained')
                 digest.update(chunk)
-        if digest.hexdigest().lower() != checksum.removeprefix('sha256:').lower():
+        if digest.hexdigest().lower() != checksum.removeprefix('sha256:').removeprefix('git-sha1:').lower():
             partial.unlink()
             raise RuntimeError('Checksum mismatch; corrupt download discarded. Retry the download.')
     if cancel.is_set():

@@ -5,7 +5,7 @@ if not exist ".venv\Scripts\pythonw.exe" (
   pause
   exit /b 1
 )
-.venv\Scripts\python.exe -c "import PySide6.QtWidgets, PySide6.QtMultimedia, psutil, PIL, pymupdf, imageio_ffmpeg, pytesseract" >nul 2>&1
+.venv\Scripts\python.exe -c "import PySide6.QtWidgets, PySide6.QtMultimedia, psutil, PIL, pymupdf, imageio_ffmpeg" >nul 2>&1
 if errorlevel 1 (
   echo Desktop dependencies are missing. Run Setup-VectorDash.cmd.
   pause

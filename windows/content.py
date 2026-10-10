@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from array import array
 import math
+import csv
 import ast
 import io
 import json
@@ -15,7 +16,6 @@ import threading
 import wave
 from PIL import Image, ImageOps
 import pymupdf
-import pytesseract
 import imageio_ffmpeg
 
 IMAGE = {'.jpg','.jpeg','.png','.webp','.bmp','.tif','.tiff','.gif'}
@@ -72,14 +72,24 @@ def ocr(image, settings):
     program=ocr_program(settings)
     if not program:
         return '',[]
-    pytesseract.pytesseract.tesseract_cmd=program
-    data=pytesseract.image_to_data(image,lang=settings.get('ocr_languages','eng') or 'eng',output_type=pytesseract.Output.DICT,timeout=90)
+    buffer=io.BytesIO()
+    image.save(buffer,format='PNG')
+    args=[program,'stdin','stdout','-l',settings.get('ocr_languages','eng') or 'eng','-c','tessedit_create_tsv=1']
+    if settings.get('ocr_data'):
+        args+=['--tessdata-dir',str(Path(settings['ocr_data']))]
+    # Use literal subprocess arguments; wrappers can leave quotes inside Windows
+    # data paths containing spaces. PNG stdin also avoids temporary image files.
+    result=subprocess.run(args,input=buffer.getvalue(),capture_output=True,timeout=90,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    if result.returncode:
+        raise RuntimeError('OCR failed: '+result.stderr.decode('utf-8',errors='replace')[-1000:])
     words=[]
     boxes=[]
-    for i,word in enumerate(data['text']):
-        if word.strip() and float(data['conf'][i]) >= 0:
+    rows=csv.DictReader(io.StringIO(result.stdout.decode('utf-8',errors='replace')),delimiter='\t',quoting=csv.QUOTE_NONE)
+    for row in rows:
+        word=row.get('text','') or ''
+        if word.strip() and float(row['conf'])>=0:
             words.append(word)
-            boxes.append([word,data['left'][i],data['top'][i],data['width'][i],data['height'][i]])
+            boxes.append([word,int(row['left']),int(row['top']),int(row['width']),int(row['height'])])
     return ' '.join(words),boxes
 
 def image_bytes(image):

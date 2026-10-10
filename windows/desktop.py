@@ -23,6 +23,8 @@ from digup_windows import command, embed
 from windows_integration import GlobalHotkey, HOTKEY_ID, set_startup, parse_devices, idle_seconds, gpu_utilization
 from scheduling import schedule_due, idle_allowed, next_run
 from setup_runtime import catalogs, install_runtime, install_model
+from setup_tools import install_ocr, install_ffmpeg
+from content import ocr_program, ffmpeg
 
 class Events(QObject):
     status = Signal(str)
@@ -83,6 +85,26 @@ def card(title, subtitle=''):
     if subtitle:
         layout.addWidget(label(subtitle,'muted'))
     return frame,layout
+
+def scroll_settings(widget,event):
+    event.ignore()
+    parent=widget.parentWidget()
+    while parent is not None and not isinstance(parent,QScrollArea):
+        parent=parent.parentWidget()
+    if parent is not None:
+        QApplication.sendEvent(parent.viewport(),event)
+
+class ScrollSafeSpinBox(QSpinBox):
+    def wheelEvent(self,event):
+        scroll_settings(self,event)
+
+class ScrollSafeTimeEdit(QTimeEdit):
+    def wheelEvent(self,event):
+        scroll_settings(self,event)
+
+class ScrollSafeComboBox(QComboBox):
+    def wheelEvent(self,event):
+        scroll_settings(self,event)
 
 class SearchEdit(QLineEdit):
     def __init__(self, results):
@@ -343,18 +365,18 @@ class Desktop(QMainWindow):
             layout.addWidget(label(title))
         value=self.settings.get(key)
         if kind=='combo':
-            widget=QComboBox()
+            widget=ScrollSafeComboBox()
             widget.addItems(options)
             widget.setCurrentText(value)
         elif kind=='check':
             widget=QCheckBox(title)
             widget.setChecked(bool(value))
         elif kind=='spin':
-            widget=QSpinBox()
+            widget=ScrollSafeSpinBox()
             widget.setRange(minimum,maximum)
             widget.setValue(value)
         elif kind=='time':
-            widget=QTimeEdit(QTime.fromString(value,'HH:mm'))
+            widget=ScrollSafeTimeEdit(QTime.fromString(value,'HH:mm'))
             widget.setDisplayFormat('hh:mm AP')
         else:
             widget=QLineEdit(str(value or ''))
@@ -392,22 +414,18 @@ class Desktop(QMainWindow):
         self.sources.setMinimumHeight(180)
         self.sources.addItems(self.settings['roots'])
         inside.addWidget(self.sources)
-        self.drives=QComboBox()
+        self.drives=ScrollSafeComboBox()
         if os.name=='nt':
             mask=ctypes.windll.kernel32.GetLogicalDrives()
             self.drives.addItems([f'{chr(65+i)}:\\' for i in range(26) if mask & (1<<i)])
         inside.addWidget(row(button('Add folder…',self.add_folder,True),self.drives,button('Add drive',lambda:self.add_source(self.drives.currentText())),button('Remove',self.remove_source)))
         layout.addWidget(frame)
         frame,inside=card('Search file contents','Photos, audio and video require semantic search and the matching vision + audio encoder. PDFs retain their page numbers.')
-        for key,title in [('index_images','Photos and screenshots'),('index_audio','Audio and video soundtracks'),('index_video','Video frames'),('ocr_enabled','Read text in screenshots and scanned PDFs')]:
+        for key,title in [('index_images','Photos and screenshots'),('index_audio','Audio and video soundtracks'),('index_video','Video frames')]:
             self.field(inside,key,title,'check')
         self.field(inside,'video_interval','Seconds between sampled video frames','spin',minimum=1,maximum=30)
         inside.addWidget(label('Scene changes are also sampled. A brief event between frames can be missed; use 1 second for finer coverage. Audio uses overlapping 30-second windows.','muted'))
-        self.field(inside,'ocr_path','Tesseract executable (blank = detect installed copy)')
-        inside.addWidget(row(button('Browse OCR executable…',lambda:self.browse('ocr_path')),button('OCR installation help',lambda:self.open_file('https://tesseract-ocr.github.io/tessdoc/Installation.html'))))
-        self.field(inside,'ocr_languages','OCR languages, e.g. eng+ben+ara (installed language packs required)')
-        self.field(inside,'ffmpeg_path','FFmpeg executable (blank = installed or bundled copy)')
-        inside.addWidget(label('Tesseract is required for exact screenshot text and scanned PDFs. EmbeddingGemma searches multilingual text and visual/audio meaning locally.','muted'))
+        inside.addWidget(label('OCR, decoder and encoder setup are in Models & hardware.','muted'))
         layout.addWidget(frame)
         frame,inside=card('Code search','Opt in, choose project folders, then prefix your query with code:. Git ignored files are excluded.')
         self.field(inside,'code_enabled','Enable code search','check')
@@ -435,7 +453,7 @@ class Desktop(QMainWindow):
         frame,inside=card('Local inference','Keep your existing runtime and model, or download them below.')
         self.field(inside,'semantic','Use semantic search','check')
         self.field(inside,'mode','Run on','combo',['CPU / system RAM','Dedicated GPU','Integrated GPU'])
-        self.devices=QComboBox()
+        self.devices=ScrollSafeComboBox()
         self.devices.addItem(self.settings['device'] or 'Select an adapter',self.settings['device'])
         inside.addWidget(label('Inference device'))
         inside.addWidget(row(self.devices,button('Refresh devices',self.refresh_devices)))
@@ -449,13 +467,17 @@ class Desktop(QMainWindow):
         layout.addWidget(frame)
         frame,inside=card('Download and set up','Runtime: ggml-org/llama.cpp · Model: ggml-org/embeddinggemma-2-GGUF')
         inside.addWidget(button('Load available downloads',self.load_catalog))
-        self.runtime_choice=QComboBox()
-        self.quant_choice=QComboBox()
+        self.runtime_choice=ScrollSafeComboBox()
+        self.quant_choice=ScrollSafeComboBox()
+        self.quant_choice.addItem('Q8_0 (recommended)','Q8_0')
+        self.quant_choice.addItem('BF16','BF16')
+        if 'BF16' in Path(self.settings.get('model','')).name.upper():
+            self.quant_choice.setCurrentIndex(1)
         inside.addWidget(label('Windows runtime'))
         inside.addWidget(self.runtime_choice)
         inside.addWidget(label('EmbeddingGemma 2 quantization'))
         inside.addWidget(self.quant_choice)
-        self.download_summary=label('Choose existing paths above, or load the catalog to install managed copies.','muted')
+        self.download_summary=label('Choose a quantization and click download; catalogs load automatically. Load available downloads to choose a runtime build.','muted')
         inside.addWidget(self.download_summary)
         self.runtime_choice.currentIndexChanged.connect(self.catalog_summary)
         self.quant_choice.currentIndexChanged.connect(self.catalog_summary)
@@ -465,6 +487,21 @@ class Desktop(QMainWindow):
         inside.addWidget(row(button('Install runtime',lambda:self.install('server'),True),button('Download model + encoder',lambda:self.install('model'),True),button('Encoder only',lambda:self.install('projector')),button('Cancel download',self.download_cancel.set)))
         inside.addWidget(label('Downloads are resumable. Models are checked against SHA-256. Runtime checksums are verified when supplied by GitHub. Existing paths remain available.','muted'))
         layout.addWidget(frame)
+        frame,inside=card('OCR and media tools','Optional OCR provides exact screenshot text. FFmpeg decodes audio/video and is included with VectorDash.')
+        self.field(inside,'ocr_enabled','Extract exact text from screenshots and scanned PDFs','check')
+        self.field(inside,'ocr_path','Tesseract executable (blank = detect installed copy)')
+        inside.addWidget(button('Browse OCR executable…',lambda:self.browse('ocr_path')))
+        self.field(inside,'ocr_languages','OCR language packs, e.g. eng+ben+ara')
+        self.field(inside,'ocr_data','OCR language data folder (set automatically during setup)')
+        inside.addWidget(button('Download and set up OCR + languages',lambda:self.install_tool('ocr'),True))
+        self.field(inside,'ffmpeg_path','FFmpeg executable (blank = installed or included copy)')
+        inside.addWidget(row(button('Browse FFmpeg…',lambda:self.browse('ffmpeg_path')),button('One-click FFmpeg setup',lambda:self.install_tool('ffmpeg'),True)))
+        inside.addWidget(row(button('Save tool settings',self.save),button('Cancel remaining downloads',self.download_cancel.set)))
+        self.tool_state=label('','muted')
+        inside.addWidget(self.tool_state)
+        inside.addWidget(label('The model GGUF handles text. Its mmproj file supplies EmbeddingGemma’s own image/audio encoders. Tesseract is optional for exact OCR; FFmpeg is only needed for audio/video.','muted'))
+        layout.addWidget(frame)
+        self.update_tool_state()
         layout.addStretch()
 
     def schedule_page(self):
@@ -586,6 +623,7 @@ class Desktop(QMainWindow):
         self.store.values=values
         self.store.save()
         self.apply_theme()
+        self.update_tool_state()
         self.shortcut_hint.setText(f'Describe a file, or press {values["hotkey"]} from any app.')
         if not quiet:
             self.set_status('Settings saved')
@@ -975,14 +1013,15 @@ class Desktop(QMainWindow):
         if error:
             self.error('Catalog unavailable: '+error)
             return
+        selected_quant=self.quant_choice.currentData() or 'Q8_0'
         self.runtimes,self.models=runtimes,models
         self.runtime_choice.clear()
         self.quant_choice.clear()
         for item in runtimes:
             self.runtime_choice.addItem(f'{item["label"]} · {item["size"]/1024**2:.0f} MB')
         for item in models:
-            self.quant_choice.addItem(f'{item["label"]} · {item["size"]/1024**2:.0f} MB')
-        self.quant_choice.setCurrentIndex(next((i for i,item in enumerate(models) if item['label']=='Q8_0'),0))
+            self.quant_choice.addItem(f'{item["label"]} · {item["size"]/1024**2:.0f} MB',item['label'])
+        self.quant_choice.setCurrentIndex(next((i for i,item in enumerate(models) if item['label']==selected_quant),0))
         preferred=next((i for i,item in enumerate(runtimes) if item['backend']=='vulkan'),0)
         if self.settings['mode']=='Dedicated GPU' and self.settings['device'].upper().startswith('CUDA'):
             preferred=next((i for i,item in enumerate(runtimes) if item['backend'].startswith('cuda-12')),preferred)
@@ -999,26 +1038,67 @@ class Desktop(QMainWindow):
             total=self.runtimes[r]['size']+self.models[q]['size']+self.models[q].get('projector',{}).get('size',0)
             self.download_summary.setText(f'Total download: {total/1024**2:.0f} MB. Model SHA-256 verified. Choose the runtime for your hardware; existing installations are retained.')
 
+    def update_tool_state(self):
+        try:
+            engine=ocr_program(self.settings)
+            decoder=ffmpeg(self.settings)
+            self.tool_state.setText(('OCR detected' if engine else 'OCR not installed; image meaning search still works')+' · '+('Media decoder available' if Path(decoder).is_file() else 'Media decoder needs setup'))
+        except Exception as error:
+            self.tool_state.setText(str(error))
+
+    def install_tool(self,key):
+        if self.installing or self.indexing:
+            self.set_status('Finish the current download/indexing task before setting up tools')
+            return
+        if not self.save(quiet=True):
+            return
+        snapshot=dict(self.settings)
+        self.download_cancel.clear()
+        self.installing=True
+        self.download_bar.setValue(0)
+        self.set_status('Setting up '+('OCR and selected languages' if key=='ocr' else 'included FFmpeg'))
+        def work():
+            try:
+                paths=install_ocr(snapshot,self.store.home,self.download_cancel,self.events.progress.emit) if key=='ocr' else install_ffmpeg(self.store.home,self.download_cancel,self.events.progress.emit)
+                self.events.installed.emit('tools',json.dumps(paths),'')
+            except Exception as error:
+                self.events.installed.emit('tools','',str(error))
+        self.launch(work)
+
     def install(self,key):
         if self.installing:
             self.set_status('A download is already running')
             return
-        choices=self.runtimes if key=='server' else self.models
-        index=self.runtime_choice.currentIndex() if key=='server' else self.quant_choice.currentIndex()
-        if not choices or index<0:
-            self.set_status('Load the download catalog first')
-            return
-        item=choices[index]
-        if key=='projector':
-            item=item.get('projector')
-            if not item:
-                self.error('No matching vision/audio encoder is available for this model.')
-                return
+        quant=self.quant_choice.currentData() or 'Q8_0'
+        runtime_index=self.runtime_choice.currentIndex()
+        model_index=self.quant_choice.currentIndex()
+        available_runtimes=list(self.runtimes)
+        available_models=list(self.models)
+        mode=self.widgets['mode'].currentText()
+        device=self.devices.currentData() or ''
         self.download_cancel.clear()
         self.installing=True
         self.download_bar.setValue(0)
+        self.set_status('Preparing '+('vision/audio encoder' if key=='projector' else 'download'))
         def work():
             try:
+                runtimes,models=available_runtimes,available_models
+                if not runtimes or not models:
+                    runtimes,models=catalogs()
+                    self.events.catalog.emit(runtimes,models,'')
+                    preferred='cpu' if mode=='CPU / system RAM' else ('cuda-' if str(device).upper().startswith('CUDA') else 'vulkan')
+                    runtime_index_local=next((i for i,item in enumerate(runtimes) if item['backend'].startswith(preferred)),0)
+                    model_index_local=next((i for i,item in enumerate(models) if item['label']==quant),-1)
+                    if model_index_local<0:
+                        raise ValueError('The selected quantization is unavailable. Load the catalog and select an available model.')
+                else:
+                    runtime_index_local=runtime_index
+                    model_index_local=model_index
+                item=runtimes[runtime_index_local] if key=='server' else models[model_index_local]
+                if key=='projector':
+                    item=item.get('projector')
+                    if not item:
+                        raise ValueError('No matching vision/audio encoder is available for this model.')
                 function=install_runtime if key=='server' else install_model
                 path=function(item,self.store.home,self.download_cancel,self.events.progress.emit)
                 if key=='model' and item.get('projector'):
@@ -1031,20 +1111,23 @@ class Desktop(QMainWindow):
 
     def download_progress(self,title,done,total):
         self.download_bar.setValue(round(done/total*100) if total else 0)
-        self.set_status(f'{title}: {done/1024**2:.0f} / {total/1024**2:.0f} MB')
+        self.set_status(f'{title}: {done/1024**2:.0f} / {total/1024**2:.0f} MB' if total else title)
 
     def install_finished(self,key,path,error):
         self.installing=False
         if error:
             self.set_status(error)
             return
-        paths=json.loads(path) if key=='model' and path.startswith('{') else {key:path}
+        paths=json.loads(path) if path.startswith('{') else {key:path}
         for name,value in paths.items():
             self.widgets[name].setText(value)
             self.settings[name]=value
         self.store.save()
         self.download_bar.setValue(100)
         self.set_status('Installed. Refresh devices, select hardware, then start/test the model.' if key=='server' else 'Model downloaded and verified. Start/test the model, then update your index.')
+        self.update_tool_state()
+        if key=='tools':
+            self.set_status('Tools installed, verified and configured. Update the index to apply OCR changes.')
         if key=='server':
             self.refresh_devices()
 

@@ -16,7 +16,7 @@ from content import Segment, extract, project_files, code_segments, ocr_program,
 
 DEFAULTS = {
     'projector': '', 'index_images': True, 'index_audio': True, 'index_video': True,
-    'ocr_enabled': True, 'ocr_path': '', 'ocr_languages': 'eng', 'ffmpeg_path': '',
+    'ocr_enabled': True, 'ocr_path': '', 'ocr_data': '', 'ocr_languages': 'eng', 'ffmpeg_path': '',
     'video_interval': 3, 'code_enabled': False, 'code_roots': [],
     'roots': [], 'mode': 'CPU / system RAM', 'server': '', 'model': '', 'device': '',
     'semantic': False, 'theme': 'System', 'hotkey': 'Ctrl+Shift+Space',
@@ -148,8 +148,14 @@ class Engine:
     def index(self, settings, progress=lambda text: None, condition=lambda: True, force=False):
         signature=model_signature(settings)
         verify_server_model(settings)
-        content_options={key:settings.get(key) for key in ('index_images','index_audio','index_video','ocr_enabled','ocr_path','ocr_languages','video_interval','code_enabled','code_roots')}
-        content_options['detected_ocr']=ocr_program(settings)
+        content_options={key:settings.get(key) for key in ('index_images','index_audio','index_video','ocr_enabled','ocr_path','ocr_data','ocr_languages','video_interval','code_enabled','code_roots')}
+        detected_ocr=ocr_program(settings)
+        content_options['detected_ocr']=detected_ocr
+        if settings.get('ocr_enabled',True):
+            candidates=[Path(detected_ocr)] if detected_ocr else []
+            if settings.get('ocr_data'):
+                candidates.extend(Path(settings['ocr_data'])/(code+'.traineddata') for code in settings.get('ocr_languages','eng').split('+'))
+            content_options['ocr_files']=[[str(path),path.stat().st_size,path.stat().st_mtime_ns] for path in candidates if path.is_file()]
         content_options['ffmpeg_path']=settings.get('ffmpeg_path','')
         configuration=json.dumps(content_options,sort_keys=True)
         warnings=[]

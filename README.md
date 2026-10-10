@@ -76,12 +76,30 @@ The server binds to loopback port 8787. VectorDash only stops servers it started
 An external server must be stopped from its original application before changing
 its model/encoder.
 
-**OCR:** install [Tesseract for Windows](https://tesseract-ocr.github.io/tessdoc/Installation.html).
-VectorDash detects common installations; Sources also accepts an executable path.
-English OCR is the default. For Bengali/Arabic screenshots, install the corresponding
-Tesseract language packs and select `eng+ben+ara`. Multilingual text notes do not
-need OCR language packs. Missing OCR produces a visible index warning. FFmpeg is
-bundled by the Python dependency, or you can select an existing executable.
+**OCR and media tools:** all paths, OCR language choices and one-click setup are
+in **Models & hardware**. **Download and set up OCR + languages** reuses an installed
+Tesseract or installs it with Windows App Installer (WinGet), downloads the selected
+official language packs, verifies them, and saves the paths. Windows may show an
+installer permission prompt. **One-click FFmpeg setup** configures the decoder
+already included with VectorDash; no separate media-tool download is required.
+**Encoder only** automatically loads the catalog and downloads/configures the mmproj
+for the selected quantization without requiring a separate catalog-loading step.
+
+The model contains its own vision/audio encoders; mmproj is how the GGUF runtime
+packages those components. It is required for image/audio embeddings, and is not a
+second image recognition model. Tesseract is optional for semantic photo/screenshot
+search; it extracts literal OCR words, identifiers and highlight positions. Plain
+text/PDF text needs neither Tesseract nor FFmpeg. FFmpeg only decodes audio/video.
+Google documents the independent encoders in its
+[model card](https://huggingface.co/google/embeddinggemma-2#2-selective-encoder-loading);
+[GGUF files](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/tree/main) contain
+the separate mmproj weights.
+
+For Bengali/Arabic screenshots select `eng+ben+ara` and click OCR setup. Language
+packs live in VectorDash's managed tools folder without modifying an existing
+Tesseract installation. Multilingual text notes do not need OCR packs. Missing OCR
+produces a visible index warning. Numeric/time fields and closed dropdowns forward
+wheel gestures to the settings page; deliberate typing and arrow keys still work.
 
 ## Windows conveniences
 
@@ -114,12 +132,14 @@ The data folder contains `settings.json`, `index.sqlite` and `model.log`.
 
 ## Validation
 
-The Windows suite has 50 regression checks. Native UI checks cover hotkeys,
+The Windows suite has 57 regression checks. Native UI checks cover hotkeys,
 settings, tray/taskbar behavior, scheduling and selectable devices. Real model
 checks verified cellphone and dog-on-beach retrieval from numerically named photographs, a timed zebra
 video, spoken sleep audio, OCR invoice/error identifiers, PDF page 2, English to
 Arabic/Bengali notes, Bengali to English retrieval and a Python retry function.
-Native previews were checked for page highlights, read-only source locations,
+Tool setup was checked with real English/Bengali/Arabic packs and the included
+FFmpeg decoder; native tests verify wheel scrolling preserves field values and
+keyboard editing still works. Native previews were checked for page highlights, read-only source locations,
 video/audio seeking and clean closing. Run the unit suite with:
 
 ```powershell
