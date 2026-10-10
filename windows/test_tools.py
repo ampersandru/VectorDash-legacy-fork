@@ -76,7 +76,7 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(text,'INV-2026_8832')
         self.assertEqual(boxes,[['INV-2026_8832',20,30,80,15]])
         args=run.call_args.args[0]
-        self.assertEqual(args[args.index('--tessdata-dir')+1],settings['ocr_data'])
+        self.assertEqual(args[args.index('--tessdata-dir')+1],str(Path(settings['ocr_data'])))
         self.assertTrue(run.call_args.kwargs['input'].startswith(b'\x89PNG'))
 
     def test_missing_winget_reports_actionable_error(self):
