@@ -1,4 +1,6 @@
 """Modern VectorDash Windows desktop, quick search, setup and scheduling."""
+import logging
+import math
 import ctypes
 from ctypes import wintypes
 from datetime import datetime
@@ -8,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import process_lifecycle
 import sys
 import threading
 import time
@@ -16,10 +19,10 @@ import psutil
 from PySide6.QtCore import Qt, QObject, Signal, QTimer, QTime, QAbstractNativeEventFilter, QFileInfo, QEvent
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut, QCursor, QPainter, QColor, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QStackedWidget, QComboBox, QCheckBox, QSpinBox, QTimeEdit, QFileDialog, QMessageBox, QFrame, QSystemTrayIcon, QMenu, QProgressBar, QScrollArea, QFileIconProvider, QAbstractItemView)
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QStackedWidget, QComboBox, QCheckBox, QSpinBox, QTimeEdit, QFileDialog, QMessageBox, QFrame, QSystemTrayIcon, QMenu, QProgressBar, QScrollArea, QFileIconProvider, QAbstractItemView, QPlainTextEdit)
 from engine import Engine, Settings, SearchResult, verify_server_model
 from previews import Preview
-from digup_windows import command, embed
+from digup_windows import command, embed, embedding_request, server_url
 from windows_integration import GlobalHotkey, HOTKEY_ID, set_startup, parse_devices, idle_seconds, gpu_utilization
 from scheduling import schedule_due, idle_allowed, next_run
 from setup_runtime import catalogs, install_runtime, install_model
@@ -36,15 +39,20 @@ class Events(QObject):
     progress = Signal(str, object, object)
     metrics = Signal(object)
     model = Signal(str)
+    log = Signal(str, str)
 
-def app_icon():
+def app_icon(active=False, phase=0):
     pixmap=QPixmap(64,64)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter=QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(QColor('#6757e8'))
+    painter.setBrush(QColor('#d83b50' if active else '#6757e8'))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawRoundedRect(2,2,60,60,17,17)
+    if active:
+        painter.translate(32,32)
+        painter.rotate(math.sin(phase)*18)
+        painter.translate(-32,-32)
     painter.setPen(QPen(QColor('white'),5))
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawEllipse(17,14,25,25)
@@ -221,10 +229,18 @@ class QuickSearch(QWidget):
             self.hide()
         return super().event(event)
 
+class UiLogHandler(logging.Handler):
+    def __init__(self, events):
+        super().__init__()
+        self.events=events
+    def emit(self, record):
+        self.events.log.emit(record.levelname,self.format(record))
+
 class Desktop(QMainWindow):
     def __init__(self, settings, ipc=None):
         super().__init__()
         self.store=settings
+        process_lifecycle.reopen()
         self.settings=settings.values
         self.engine=Engine(settings.home)
         self.events=Events()
@@ -235,12 +251,22 @@ class Desktop(QMainWindow):
         self.metrics={'cpu':None,'gpu':None,'idle':None,'on_ac':None}
         self.metrics_time=0
         self.schedule_retry=0
+        self.attached_server=None
         self.model_process=None
         self.model_log=None
         self.download_cancel=threading.Event()
         self.search_sequence=0
         self.pending_search=None
         self.search_running=False
+        self.log_records=[]
+        existing_log=self.store.home/'vectordash.log'
+        if existing_log.exists():
+            for line in existing_log.read_text(encoding='utf-8',errors='replace')[-100000:].splitlines():
+                level=next((name for name in ('DEBUG','INFO','WARNING','ERROR','CRITICAL') if ' '+name+' ' in line),'INFO')
+                self.log_records.append((level,line))
+            self.log_records=self.log_records[-2000:]
+        self.probing_model=False
+        self.icon_phase=0
         self.widgets={}
         self.runtimes=[]
         self.models=[]
@@ -249,6 +275,14 @@ class Desktop(QMainWindow):
         self.setWindowIcon(app_icon())
         self.resize(1120,820)
         self.setMinimumSize(850,620)
+        self.events.log.connect(self.append_log)
+        self.logger=logging.getLogger('vectordash')
+        self.logger.setLevel(logging.DEBUG)
+        self.log_handler=UiLogHandler(self.events)
+        self.log_file_handler=logging.FileHandler(self.store.home/'vectordash.log',encoding='utf-8')
+        self.log_file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+        self.logger.addHandler(self.log_handler)
+        self.logger.addHandler(self.log_file_handler)
         self.events.status.connect(self.set_status)
         self.events.indexed.connect(self.index_finished)
         self.events.searched.connect(self.search_finished)
@@ -294,6 +328,12 @@ class Desktop(QMainWindow):
         self.process_timer.setInterval(2000)
         self.process_timer.timeout.connect(self.check_model_exit)
         self.process_timer.start()
+        self.icon_timer=QTimer(self)
+        self.icon_timer.setInterval(120)
+        self.icon_timer.timeout.connect(self.animate_index_icon)
+        self.icon_timer.start()
+        QApplication.instance().aboutToQuit.connect(self.cleanup)
+        QTimer.singleShot(1000,self.probe_model)
         QApplication.styleHints().colorSchemeChanged.connect(lambda:self.apply_theme() if self.settings['theme']=='System' else None)
         QTimer.singleShot(500,self.tick)
         if self.settings['auto_model']:
@@ -318,7 +358,7 @@ class Desktop(QMainWindow):
         nav.addSpacing(28)
         self.navigation=QListWidget()
         self.navigation.setObjectName('navigation')
-        self.navigation.addItems(['Search','Sources','Models & hardware','Scheduling','Settings'])
+        self.navigation.addItems(['Search','Sources','Models & hardware','Scheduling','Settings','Logs'])
         self.navigation.setSpacing(6)
         nav.addWidget(self.navigation,1)
         nav.addWidget(label('On your PC.\nYour files stay local.','muted'))
@@ -339,6 +379,7 @@ class Desktop(QMainWindow):
         self.models_page()
         self.schedule_page()
         self.settings_page()
+        self.logs_page()
         self.navigation.setCurrentRow(0)
 
     def page(self,title,description):
@@ -409,6 +450,14 @@ class Desktop(QMainWindow):
 
     def sources_page(self):
         layout=self.page('Your sources','Choose the drives and folders VectorDash can read.')
+        frame,inside=card('Index status','Pause keeps your progress. Cancel keeps the previous completed index.')
+        self.source_status=label('Ready','muted')
+        self.source_progress=QProgressBar()
+        self.source_progress.setValue(0)
+        inside.addWidget(self.source_status)
+        inside.addWidget(self.source_progress)
+        inside.addWidget(row(button('Pause / resume',self.pause_index),button('Cancel indexing',self.engine.cancel.set)))
+        layout.addWidget(frame)
         frame,inside=card('Drives and folders','Hidden/system folders, cloud placeholders and common secrets are skipped.')
         self.sources=QListWidget()
         self.sources.setMinimumHeight(180)
@@ -450,6 +499,22 @@ class Desktop(QMainWindow):
 
     def models_page(self):
         layout=self.page('Models & hardware','Set up local semantic search, or keep using filename and text search.')
+        frame,inside=card('One-click setup','Downloads and installs the selected runtime, model, encoder, OCR language packs and media decoder. Choose hardware and quantization below first.')
+        self.setup_progress=QProgressBar()
+        self.setup_progress.setValue(0)
+        inside.addWidget(self.setup_progress)
+        self.setup_checklist=label('Checking installed components…','muted')
+        inside.addWidget(self.setup_checklist)
+        inside.addWidget(row(button('Download, install and start',self.setup_all,True),button('Refresh status',self.probe_model),button('Cancel setup',self.download_cancel.set)))
+        layout.addWidget(frame)
+        frame,inside=card('Server connection','Remote mode sends indexed content and search queries to your chosen server.')
+        self.field(inside,'server_mode','Embedding server','combo',['Local','Remote'])
+        self.field(inside,'remote_url','Remote server URL, e.g. http://192.168.1.10:8787')
+        self.field(inside,'remote_model_id','Remote model identifier (as reported by /props)')
+        self.field(inside,'remote_key','Remote API key (optional)')
+        self.widgets['remote_key'].setEchoMode(QLineEdit.EchoMode.Password)
+        inside.addWidget(row(button('Save connection',self.save),button('Connect / check status',self.start_model)))
+        layout.addWidget(frame)
         frame,inside=card('Local inference','Keep your existing runtime and model, or download them below.')
         self.field(inside,'semantic','Use semantic search','check')
         self.field(inside,'mode','Run on','combo',['CPU / system RAM','Dedicated GPU','Integrated GPU'])
@@ -554,6 +619,11 @@ class Desktop(QMainWindow):
 
     def settings_page(self):
         layout=self.page('Settings','Make VectorDash fit the way you use Windows.')
+        frame,inside=card('Model status')
+        self.settings_model_state=label(self.model_state.text(),'muted')
+        inside.addWidget(self.settings_model_state)
+        inside.addWidget(button('Refresh model status',self.probe_model))
+        layout.addWidget(frame)
         frame,inside=card('Appearance and shortcut')
         self.field(inside,'theme','Appearance','combo',['System','Light','Dark'])
         self.field(inside,'hotkey','Global quick-search shortcut')
@@ -595,6 +665,12 @@ class Desktop(QMainWindow):
 
     def save(self, quiet=False):
         values=self.read_widgets()
+        if values.get('server_mode')=='Remote':
+            from urllib.parse import urlparse
+            endpoint=urlparse(values.get('remote_url',''))
+            if endpoint.scheme not in ('http','https') or not endpoint.hostname:
+                self.error('Enter a complete http:// or https:// remote server URL.')
+                return False
         if values['schedule_mode'] in ('At selected time','Time + idle') and not values['schedule_days']:
             self.error('Select at least one scheduling day.')
             return False
@@ -690,6 +766,8 @@ class Desktop(QMainWindow):
         self.status.setText(text)
         if self.indexing:
             self.index_status.setText(text)
+            self.source_status.setText(text)
+        self.logger.log(logging.WARNING if text.startswith('Skipped ') else logging.ERROR if 'failed' in text.lower() else logging.DEBUG if text.startswith('Reading ') else logging.INFO,text)
 
     def show_main(self,index=None):
         if index is not None:
@@ -736,6 +814,9 @@ class Desktop(QMainWindow):
             self.set_status('Source removed. Update the index to remove its results.')
 
     def start_index(self,force=False,scheduled=False,slot=''):
+        if self.installing:
+            self.set_status('Finish setup before indexing')
+            return
         if self.indexing:
             self.set_status('An indexing task is already running')
             return
@@ -747,6 +828,7 @@ class Desktop(QMainWindow):
         self.engine.cancel.clear()
         self.engine.paused.clear()
         self.indexing=True
+        self.source_progress.setRange(0,0)
         self.automatic_active=scheduled
         snapshot=dict(self.settings)
         self.set_status('Checking selected sources…')
@@ -775,10 +857,15 @@ class Desktop(QMainWindow):
 
     def index_finished(self,message,slot,success,origin):
         self.indexing=False
+        self.source_progress.setRange(0,100)
+        self.source_progress.setValue(100 if success else 0)
+        self.source_status.setText(message)
         self.automatic_active=False
         self.engine.paused.clear()
         self.index_status.setText(message)
         self.set_status(message)
+        if not success:
+            self.logger.error('Indexing stopped: %s',message)
         now=datetime.now().isoformat(timespec='seconds')
         if success:
             self.settings['last_success']=now
@@ -866,7 +953,7 @@ class Desktop(QMainWindow):
 
     def reveal(self):
         if path:=self.results.selected_path():
-            subprocess.Popen(['explorer.exe',f'/select,{path}'])
+            process_lifecycle.popen(['explorer.exe',f'/select,{path}'])
 
     def copy_path(self):
         if path:=self.results.selected_path():
@@ -908,6 +995,9 @@ class Desktop(QMainWindow):
             return
         if not self.save(quiet=True):
             return
+        if self.settings.get('server_mode')=='Remote':
+            self.probe_model()
+            return
         if self.model_process and self.model_process.poll() is None:
             self.set_status('The model is already running')
             return
@@ -921,12 +1011,13 @@ class Desktop(QMainWindow):
             if occupied:
                 try:
                     verify_server_model(dict(self.settings,semantic=True))
-                    self.model_status('Connected to the existing local server. Stop it from its original app before changing models.')
+                    self.attach_local_server()
+                    self.model_status('Model: loaded · connected to existing local server')
                     return
                 except Exception as error:
                     raise ValueError('Port 8787 is already occupied. Stop the existing server before starting a new model. '+str(error)) from error
             self.model_log=open(self.store.home/'model.log','w',encoding='utf-8')
-            self.model_process=subprocess.Popen(command(self.settings),stdout=self.model_log,stderr=self.model_log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            self.model_process=process_lifecycle.popen(command(self.settings),stdout=self.model_log,stderr=self.model_log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
             self.model_state.setText('Loading the model…')
             process=self.model_process
             def wait_ready():
@@ -939,7 +1030,7 @@ class Desktop(QMainWindow):
                     try:
                         with urllib.request.urlopen('http://127.0.0.1:8787/health',timeout=1) as response:
                             if json.load(response).get('status')=='ok':
-                                self.events.model.emit('Local embedding server is ready')
+                                self.events.model.emit('loaded · local embedding server ready')
                                 return
                     except Exception:
                         pass
@@ -950,8 +1041,13 @@ class Desktop(QMainWindow):
             self.error(str(error))
 
     def model_status(self,message):
+        previous=self.model_state.text()
         self.model_state.setText(message)
-        self.set_status(message)
+        if hasattr(self,'settings_model_state'):
+            self.settings_model_state.setText(message)
+        if previous!=message:
+            self.set_status(message)
+        self.update_tool_state()
 
     def check_model_exit(self):
         if self.model_process and self.model_process.poll() is not None:
@@ -966,18 +1062,25 @@ class Desktop(QMainWindow):
         process=self.model_process
         self.model_process=None
         if process and process.poll() is None:
-            process.terminate()
-            def finish():
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
+            try:
+                root=psutil.Process(process.pid)
+                children=root.children(recursive=True)
+                for child in children:
+                    try: child.terminate()
+                    except psutil.Error: pass
+                root.terminate()
+                _,alive=psutil.wait_procs(children+[root],timeout=3)
+                for child in alive:
+                    try: child.kill()
+                    except psutil.Error: pass
+                process.wait(timeout=3)
+            except (psutil.Error,subprocess.TimeoutExpired):
+                if process.poll() is None:
                     process.kill()
-                    process.wait()
-            self.launch(finish)
         if self.model_log:
             self.model_log.close()
             self.model_log=None
-        self.model_status('Local model stopped' if process else 'No model owned by this app. An external server must be stopped from its original app.')
+        self.model_status('Model: stopped' if process else 'No local model started by VectorDash is running')
 
     def test_model(self):
         if not self.save(quiet=True):
@@ -988,11 +1091,11 @@ class Desktop(QMainWindow):
             try:
                 verify_server_model(snapshot)
                 with self.engine.inference:
-                    vector=embed('task: search result | query: A document about Windows desktop search')
-                with urllib.request.urlopen('http://127.0.0.1:8787/props',timeout=5) as response:
+                    vector=embed('task: search result | query: A document about Windows desktop search',request=lambda text:embedding_request(text,snapshot))
+                with urllib.request.urlopen(urllib.request.Request(server_url(snapshot)+'/props',headers={'Authorization':'Bearer '+snapshot['remote_key']} if snapshot.get('remote_key') else {}),timeout=5) as response:
                     modalities=json.load(response).get('modalities',{})
                 ready=modalities.get('vision') and modalities.get('audio')
-                if snapshot.get('projector') and not ready:
+                if snapshot.get('server_mode')!='Remote' and snapshot.get('projector') and not ready:
                     raise ValueError('The running server has no vision/audio encoder. Stop it and start the model with the selected encoder.')
                 self.events.model.emit(f'Embedding test passed · {len(vector)} dimensions · '+('text + vision + audio ready' if ready else 'text only; download/select an encoder and restart for media search'))
             except Exception as error:
@@ -1039,6 +1142,9 @@ class Desktop(QMainWindow):
             self.download_summary.setText(f'Total download: {total/1024**2:.0f} MB. Model SHA-256 verified. Choose the runtime for your hardware; existing installations are retained.')
 
     def update_tool_state(self):
+        if hasattr(self,'setup_checklist'):
+            state=getattr(self,'model_state',None)
+            self.setup_checklist.setText('\n'.join([('✓' if Path(self.settings.get(key,'')).is_file() else '○')+' '+title for key,title in [('server','llama-server installed'),('model','EmbeddingGemma 2 installed'),('projector','Image + audio encoder installed')]])+'\n'+('✓ OCR: available' if ocr_program(self.settings) else '○ OCR: not installed')+'\n'+('✓ Media decoder: available' if Path(ffmpeg(self.settings)).is_file() else '○ Media decoder: missing')+'\n'+('Model: '+state.text() if state else 'Model: checking'))
         try:
             engine=ocr_program(self.settings)
             decoder=ffmpeg(self.settings)
@@ -1111,6 +1217,7 @@ class Desktop(QMainWindow):
 
     def download_progress(self,title,done,total):
         self.download_bar.setValue(round(done/total*100) if total else 0)
+        self.setup_progress.setValue(self.download_bar.value())
         self.set_status(f'{title}: {done/1024**2:.0f} / {total/1024**2:.0f} MB' if total else title)
 
     def install_finished(self,key,path,error):
@@ -1120,18 +1227,150 @@ class Desktop(QMainWindow):
             return
         paths=json.loads(path) if path.startswith('{') else {key:path}
         for name,value in paths.items():
-            self.widgets[name].setText(value)
+            if name=='device':
+                self.devices.clear()
+                self.devices.addItem(value,value)
+            else:
+                self.widgets[name].setText(value)
             self.settings[name]=value
         self.store.save()
         self.download_bar.setValue(100)
+        self.setup_progress.setValue(100)
         self.set_status('Installed. Refresh devices, select hardware, then start/test the model.' if key=='server' else 'Model downloaded and verified. Start/test the model, then update your index.')
         self.update_tool_state()
         if key=='tools':
             self.set_status('Tools installed, verified and configured. Update the index to apply OCR changes.')
+        if key=='setup':
+            self.widgets['semantic'].setChecked(True)
+            self.settings['semantic']=True
+            self.store.save()
+            self.start_model()
         if key=='server':
             self.refresh_devices()
 
+    def setup_all(self):
+        if self.installing or self.indexing:
+            self.set_status('Wait for the current setup or indexing task to finish')
+            return
+        if not self.save(quiet=True):
+            return
+        if self.settings.get('server_mode')=='Remote':
+            self.probe_model()
+            self.set_status('Remote models are installed on their host. Use local setup for downloads on this PC.')
+            return
+        if self.model_process:
+            self.stop_model()
+        snapshot=dict(self.settings)
+        quant=self.quant_choice.currentData() or 'Q8_0'
+        runtime_index=self.runtime_choice.currentIndex()
+        selected=self.runtimes[runtime_index] if 0<=runtime_index<len(self.runtimes) else None
+        self.installing=True
+        self.download_cancel.clear()
+        self.set_status('Preparing one-click setup…')
+        def work():
+            paths={}
+            try:
+                runtimes,models=catalogs()
+                preferred='cpu' if snapshot['mode']=='CPU / system RAM' else ('cuda-' if str(snapshot['device']).upper().startswith('CUDA') else 'vulkan')
+                runtime=selected if isinstance(selected,dict) else next(item for item in runtimes if item['backend'].startswith(preferred))
+                model=next(item for item in models if item['label']==quant)
+                for key,item,installer in [('server',runtime,install_runtime),('model',model,install_model),('projector',model['projector'],install_model)]:
+                    if self.download_cancel.is_set():
+                        raise InterruptedError('Setup cancelled')
+                    if not Path(snapshot.get(key,'')).is_file() or (key!='server' and quant not in Path(snapshot.get(key,'')).name):
+                        paths[key]=installer(item,self.store.home,self.download_cancel,self.events.progress.emit)
+                    else:
+                        paths[key]=snapshot[key]
+                if snapshot['mode']!='CPU / system RAM' and not snapshot.get('device'):
+                    result=process_lifecycle.run([paths['server'],'--list-devices'],capture_output=True,text=True,timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                    adapters=[item for item in parse_devices(result.stdout+'\n'+result.stderr) if not item[0].upper().startswith('CPU')]
+                    if not adapters:
+                        raise ValueError('No compatible GPU was found. Select CPU / system RAM and retry setup.')
+                    if snapshot['mode']=='Integrated GPU':
+                        integrated=[item for item in adapters if any(term in item[1].lower() for term in ('integrated','intel','radeon graphics','apu'))]
+                        if not integrated:
+                            raise ValueError('Select your integrated GPU from Refresh devices before starting the model.')
+                        adapters=integrated
+                    paths['device']=adapters[0][0]
+                paths.update(install_ffmpeg(self.store.home,self.download_cancel,self.events.progress.emit))
+                if snapshot.get('ocr_enabled'):
+                    paths.update(install_ocr(snapshot,self.store.home,self.download_cancel,self.events.progress.emit))
+                self.events.installed.emit('setup',json.dumps(paths),'')
+            except Exception as error:
+                # Preserve successfully installed components so retry does not repeat work.
+                if paths:
+                    self.events.installed.emit('tools',json.dumps(paths),'')
+                self.events.installed.emit('setup','',str(error))
+        self.launch(work)
+
+    def probe_model(self):
+        if self.probing_model or self.shutting_down:
+            return
+        self.probing_model=True
+        snapshot=dict(self.settings,semantic=True)
+        def work():
+            try:
+                verify_server_model(snapshot)
+                request=urllib.request.Request(server_url(snapshot)+'/props',headers={'Authorization':'Bearer '+snapshot['remote_key']} if snapshot.get('remote_key') else {})
+                with urllib.request.urlopen(request,timeout=3) as response:
+                    props=json.load(response)
+                modes=props.get('modalities',{})
+                message='loaded · text: ready · images: '+('ready' if modes.get('vision') else 'unavailable')+' · audio: '+('ready' if modes.get('audio') else 'unavailable')
+            except Exception as error:
+                self.logger.debug('Model status check: %s',error)
+                message='not loaded · '+(str(error) if isinstance(error,ValueError) else 'Start the local model or check the server connection.')
+            finally:
+                self.probing_model=False
+            if not self.shutting_down:
+                if snapshot.get('server_mode')!='Remote' and message.startswith('loaded'):
+                    self.attach_local_server()
+                self.events.model.emit(message)
+        self.launch(work)
+
+    def animate_index_icon(self):
+        active=self.indexing and not self.engine.paused.is_set() and not self.engine.cancel.is_set()
+        self.icon_phase+=.3
+        icon=app_icon(active,self.icon_phase)
+        self.setWindowIcon(icon)
+        self.tray.setIcon(icon)
+        self.tray.setToolTip('VectorDash · '+('Indexing' if active else 'Paused' if self.indexing else 'Ready'))
+
+    def logs_page(self):
+        layout=self.page('Logs','Indexing skips, setup messages and model status. Full history is saved in vectordash.log.')
+        self.log_filter=ScrollSafeComboBox()
+        self.log_filter.addItems(['All','Verbose','Info','Warning','Error'])
+        self.log_filter.currentTextChanged.connect(self.render_logs)
+        layout.addWidget(row(self.log_filter,button('Open log file',lambda:os.startfile(str(self.store.home/'vectordash.log'))),button('Open model output',lambda:self.open_model_log())))
+        self.log_view=QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)
+        layout.addWidget(self.log_view)
+        if (self.store.home/'vectordash.log').exists():
+            self.render_logs()
+
+    def open_model_log(self):
+        path=self.store.home/'model.log'
+        if path.exists():
+            os.startfile(str(path))
+        else:
+            self.set_status('No local model log yet. Start a local model first.')
+
+    def append_log(self,level,message):
+        self.log_records.append((level,datetime.now().strftime('%H:%M:%S')+' '+level+' '+message))
+        self.log_records=self.log_records[-2000:]
+        if hasattr(self,'log_view'):
+            wanted={'Verbose':'DEBUG','Info':'INFO','Warning':'WARNING','Error':'ERROR'}.get(self.log_filter.currentText())
+            if not wanted or level==wanted:
+                self.log_view.appendPlainText(self.log_records[-1][1])
+
+    def render_logs(self):
+        wanted={'Verbose':'DEBUG','Info':'INFO','Warning':'WARNING','Error':'ERROR'}.get(self.log_filter.currentText())
+        self.log_view.setPlainText('\n'.join(text for level,text in self.log_records if not wanted or level==wanted))
+        bar=self.log_view.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
     def tick(self):
+        self.probe_model()
         self.next_status.setText('Next run: '+next_run(self.settings,datetime.now()))
         if self.collecting:
             return
@@ -1183,14 +1422,65 @@ class Desktop(QMainWindow):
             self.showMinimized()
             event.ignore()
 
-    def exit_app(self):
+    def attach_local_server(self):
+        if self.model_process or self.attached_server or self.shutting_down:
+            return
+        expected=Path(self.settings.get('server','')).resolve()
+        model=self.settings.get('model','')
+        if not model:
+            return
+        for process in psutil.process_iter(['exe','cmdline']):
+            try:
+                if not process.info['exe'] or Path(process.info['exe']).resolve()!=expected:
+                    continue
+                args=process.info['cmdline'] or []
+                matching=any(args[i] in ('-m','--model') and os.path.normcase(str(Path(args[i+1]).resolve()))==os.path.normcase(str(Path(model).resolve())) for i in range(len(args)-1))
+                if matching and any(connection.laddr.port==8787 and connection.status==psutil.CONN_LISTEN for connection in process.net_connections(kind='tcp')):
+                    self.attached_server=process
+                    return
+            except (psutil.Error,OSError):
+                pass
+
+    def cleanup(self):
+        if self.shutting_down:
+            return
         self.shutting_down=True
+        process_lifecycle.close()
+        self.clock.stop()
+        self.process_timer.stop()
+        self.icon_timer.stop()
         self.engine.cancel.set()
+        self.engine.paused.clear()
         self.download_cancel.set()
         self.hotkey.unregister()
         self.stop_model()
+        if self.attached_server:
+            try:
+                self.attached_server.terminate()
+                self.attached_server.wait(timeout=3)
+            except psutil.TimeoutExpired:
+                try: self.attached_server.kill()
+                except psutil.Error: pass
+            except psutil.Error:
+                pass
+            self.attached_server=None
+        # Decoder, OCR, setup and helper processes belong to this app's process tree.
+        children=psutil.Process().children(recursive=True)
+        for child in children:
+            try: child.terminate()
+            except psutil.Error: pass
+        _,alive=psutil.wait_procs(children,timeout=3)
+        for child in alive:
+            try: child.kill()
+            except psutil.Error: pass
         self.tray.hide()
         self.quick.hide()
+        self.logger.removeHandler(self.log_handler)
+        self.logger.removeHandler(self.log_file_handler)
+        self.log_file_handler.close()
+
+    def exit_app(self):
+        self.cleanup()
         self.close()
         QApplication.instance().quit()
 
@@ -1202,7 +1492,7 @@ def main():
     app.setStyle('Fusion')
     app.setQuitOnLastWindowClosed(False)
     settings=Settings()
-    name='DigUp-'+hashlib.sha256(str(settings.home.resolve()).encode()).hexdigest()[:16]
+    name='VectorDash-'+hashlib.sha256(str(settings.home.resolve()).encode()).hexdigest()[:16]
     socket=QLocalSocket()
     socket.connectToServer(name)
     if socket.waitForConnected(400):

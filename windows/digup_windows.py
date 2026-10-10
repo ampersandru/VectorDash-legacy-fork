@@ -49,18 +49,18 @@ def command(settings):
         args += ['--device', settings['device'], '--gpu-layers', 'all']
     return args
 
-def server_url():
-    return os.environ.get('VECTORDASH_SERVER_URL','http://127.0.0.1:8787').rstrip('/')
+def server_url(settings=None):
+    return (settings.get('remote_url','') if settings and settings.get('server_mode')=='Remote' else os.environ.get('VECTORDASH_SERVER_URL','http://127.0.0.1:8787')).rstrip('/')
 
-def embedding_request(text):
+def embedding_request(text, settings=None):
     if isinstance(text, bytes):
-        with urllib.request.urlopen(server_url()+'/props', timeout=5) as response:
+        with urllib.request.urlopen(urllib.request.Request(server_url(settings)+'/props',headers={'Authorization':'Bearer '+settings['remote_key']} if settings and settings.get('remote_key') else {}), timeout=5) as response:
             props=json.load(response)
         marker=props.get('media_marker')
         if not marker:
             raise RuntimeError('This llama-server does not expose multimodal embeddings. Install a current runtime and its matching encoder.')
         text={'prompt_string': marker, 'multimodal_data': [base64.b64encode(text).decode('ascii')]}
-    request = urllib.request.Request(server_url()+'/v1/embeddings', data=json.dumps({'input': text}).encode(), headers={'Content-Type': 'application/json'})
+    request = urllib.request.Request(server_url(settings)+'/v1/embeddings', data=json.dumps({'input': text}).encode(), headers={'Content-Type': 'application/json', **({'Authorization': 'Bearer '+settings['remote_key']} if settings and settings.get('remote_key') else {})})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             vector = json.load(response)['data'][0]['embedding']

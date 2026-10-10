@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import process_lifecycle
 import threading
 import imageio_ffmpeg
 from content import ocr_program
@@ -12,7 +13,7 @@ from setup_runtime import download,fetch_json
 
 
 def check_program(path,argument='--version'):
-    result=subprocess.run([str(path),argument],capture_output=True,text=True,timeout=20,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    result=process_lifecycle.run([str(path),argument],capture_output=True,text=True,timeout=20,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     if result.returncode:
         raise RuntimeError(f'{Path(path).name} failed its readiness check: '+(result.stderr or result.stdout)[-500:])
     return str(path)
@@ -61,7 +62,7 @@ def install_ocr(settings,home,cancel,progress):
         # CurrentUser is the installer's documented per-user mode.
         args=[winget,'install','--id','UB-Mannheim.TesseractOCR','--exact','--source','winget','--silent','--accept-package-agreements','--accept-source-agreements','--disable-interactivity','--override','/S /CurrentUser']
         with log.open('w',encoding='utf-8') as output:
-            process=subprocess.Popen(args,stdout=output,stderr=output,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            process=process_lifecycle.popen(args,stdout=output,stderr=output,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
             # Do not interrupt a Windows installer halfway through writing files.
             process.wait()
         program=ocr_program(dict(settings,ocr_path=''))
@@ -85,7 +86,7 @@ def install_ocr(settings,home,cancel,progress):
             raise ValueError(f'OCR language {code} is not present in the official language catalog.')
         download(f'https://raw.githubusercontent.com/{repo}/{revision}/{name}',target/name,item['size'],'git-sha1:'+item['sha'],cancel,lambda done,total:progress('OCR language '+code,done,total))
     # Check the exact managed data folder, not just the engine executable.
-    result=subprocess.run([program,'--tessdata-dir',str(target),'--list-langs'],capture_output=True,text=True,timeout=20,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    result=process_lifecycle.run([program,'--tessdata-dir',str(target),'--list-langs'],capture_output=True,text=True,timeout=20,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     if result.returncode or any(code not in result.stdout.splitlines() for code in codes):
         raise RuntimeError('The selected OCR languages did not pass verification.')
     return {'ocr_path':program,'ocr_data':str(target),'ocr_languages':'+'.join(codes)}

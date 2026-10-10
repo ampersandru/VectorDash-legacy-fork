@@ -2,6 +2,8 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 import re
+import shutil
+import logging
 import json
 import os
 from pathlib import Path
@@ -15,6 +17,7 @@ from digup_windows import safe, read_text, embed, cosine, embedding_request, ser
 from content import Segment, extract, project_files, code_segments, ocr_program, IMAGE, AUDIO, VIDEO
 
 DEFAULTS = {
+    'server_mode': 'Local', 'remote_url': '', 'remote_key': '', 'remote_model_id': 'embeddinggemma-2',
     'projector': '', 'index_images': True, 'index_audio': True, 'index_video': True,
     'ocr_enabled': True, 'ocr_path': '', 'ocr_data': '', 'ocr_languages': 'eng', 'ffmpeg_path': '',
     'video_interval': 3, 'code_enabled': False, 'code_roots': [],
@@ -30,9 +33,21 @@ DEFAULTS = {
 
 def data_home():
     override = os.environ.get('VECTORDASH_DATA_HOME') or os.environ.get('DIGUP_DATA_HOME')
-    base = Path(os.environ.get('LOCALAPPDATA', str(Path.home())))
-    # Reuse existing installations without moving their model downloads.
-    return Path(override) if override else (base/'DigUp' if (base/'DigUp'/'settings.json').exists() else base/'VectorDash')
+    base = Path(os.environ.get('LOCALAPPDATA') or str(Path.home()))
+    if override:
+        return Path(override)
+    target=base/'VectorDash'
+    legacy=base/'DigUp'
+    if not target.exists() and (legacy/'settings.json').exists():
+        shutil.move(str(legacy),str(target))
+        settings_file=target/'settings.json'
+        values=json.loads(settings_file.read_text(encoding='utf-8-sig'))
+        for key in ('server','model','projector','ocr_path','ocr_data','ffmpeg_path'):
+            value=values.get(key,'')
+            if value and Path(value).is_relative_to(legacy):
+                values[key]=str(target/Path(value).relative_to(legacy))
+        settings_file.write_text(json.dumps(values,indent=2),encoding='utf-8')
+    return target
 
 class Settings:
     def __init__(self, home=None):
@@ -51,6 +66,8 @@ class Settings:
 def model_signature(settings):
     if not settings['semantic']:
         return ''
+    if settings.get('server_mode')=='Remote':
+        return json.dumps(['remote',server_url(settings),settings.get('remote_model_id','embeddinggemma-2'),4])
     path = Path(settings['model'])
     stat = path.stat()
     # Include the extraction/embedding algorithm version to invalidate old vectors.
@@ -62,9 +79,14 @@ def model_signature(settings):
 def verify_server_model(settings):
     if not settings['semantic']:
         return
-    with urllib.request.urlopen(server_url()+'/props',timeout=5) as response:
+    with urllib.request.urlopen(urllib.request.Request(server_url(settings)+'/props',headers={'Authorization':'Bearer '+settings['remote_key']} if settings.get('remote_key') else {}),timeout=5) as response:
         props=json.load(response)
         running=props.get('model_path')
+    if settings.get('server_mode')=='Remote':
+        expected=settings.get('remote_model_id','embeddinggemma-2').casefold()
+        if expected and expected not in str(running or props.get('model_alias','')).casefold():
+            raise ValueError('Remote server model does not match the configured model identifier.')
+        return
     if not running or os.path.normcase(str(Path(running).resolve())) != os.path.normcase(str(Path(settings['model']).resolve())):
         raise ValueError('The running server uses a different model. Stop it, then start the selected model before indexing/searching.')
 
@@ -128,16 +150,16 @@ class Engine:
                 return
             self.cancel.wait(.25)
 
-    def infer(self,segment,path,condition):
+    def infer(self,segment,path,condition,settings=None):
         def request(text):
             with self.inference:
-                return embedding_request('title: '+path.name+' | text: '+text)
+                return embedding_request('title: '+path.name+' | text: '+text,settings) if settings and settings.get('server_mode')=='Remote' else embedding_request('title: '+path.name+' | text: '+text)
         checkpoint=lambda:self.checkpoint(condition)
         if segment.media:
             checkpoint()
             with self.inference:
                 # Media must be embedded alone; a filename would contaminate its meaning.
-                visual=embedding_request(segment.media)
+                visual=embedding_request(segment.media,settings) if settings and settings.get('server_mode')=='Remote' else embedding_request(segment.media)
             if segment.text:
                 # Separate text and media vectors retain both retrieval spaces.
                 textual=embed(segment.text,checkpoint=checkpoint,request=request)
@@ -197,11 +219,11 @@ class Engine:
                         else:
                             media_kind=path.suffix.lower() in IMAGE|AUDIO|VIDEO
                             if settings['semantic'] and media_kind and not checked_media:
-                                with urllib.request.urlopen(server_url()+'/props',timeout=5) as response:
+                                with urllib.request.urlopen(urllib.request.Request(server_url(settings)+'/props',headers={'Authorization':'Bearer '+settings['remote_key']} if settings.get('remote_key') else {}),timeout=5) as response:
                                     modalities=json.load(response).get('modalities',{})
                                 needs_vision=(settings.get('index_images',True) or settings.get('index_video',True))
                                 needs_audio=settings.get('index_audio',True)
-                                if not settings.get('projector') or needs_vision and not modalities.get('vision') or needs_audio and not modalities.get('audio'):
+                                if (settings.get('server_mode')!='Remote' and not settings.get('projector')) or needs_vision and not modalities.get('vision') or needs_audio and not modalities.get('audio'):
                                     raise RuntimeError('Photos/audio/video require the matching vision + audio encoder (mmproj). Download it in Models & hardware, restart the model, then rebuild the index.')
                                 checked_media=True
                             segments=extract(path,settings,read_text,lambda:self.checkpoint(condition))
@@ -209,7 +231,7 @@ class Engine:
                         file_segments=0
                         for segment in segments:
                             self.checkpoint(condition)
-                            vectors=self.infer(segment,path,condition) if settings['semantic'] else [[]]
+                            vectors=self.infer(segment,path,condition,settings) if settings['semantic'] else [[]]
                             for vector in vectors:
                                 db.execute('INSERT INTO new_segments VALUES(?,?,?,?,?,?)',(str(path),namespace,segment.kind,segment.text,json.dumps(vector),segment.metadata()))
                             segment_count+=1
@@ -222,11 +244,16 @@ class Engine:
                             db.execute('INSERT INTO new_segments VALUES(?,?,?,?,?,?)',(str(path),namespace,'filename','','[]','{}'))
                         db.execute('INSERT OR REPLACE INTO replacement VALUES(?,?,?,?,?)',(str(path),' '.join(file_text[:10]),'[]',stat.st_mtime_ns,stat.st_size))
                     count+=1
-                except (OSError,ValueError,zipfile.BadZipFile,ET.ParseError) as error:
-                    if isinstance(error,InterruptedError):
+                except Exception as error:
+                    if isinstance(error,(InterruptedError,sqlite3.Error)):
                         raise
+                    db.execute('DELETE FROM new_segments WHERE path=? AND namespace=?',key)
                     skipped+=1
-                    warnings.append(f'{path.name}: {error}')
+                    warnings.append(f'{path}: {error}')
+                    logging.getLogger('vectordash').warning('Skipped %s: %s',path,error)
+                    logging.getLogger('vectordash').debug('File failure details: %s',path,exc_info=True)
+                    progress(f'Skipped {path.name}: {error}')
+                    db.execute('INSERT INTO new_segments VALUES(?,?,?,?,?,?)',(str(path),namespace,'filename','','[]','{}'))
             for source in settings['roots']:
                 if not Path(source).is_dir():
                     raise ValueError(f'Source unavailable: {source}; previous index retained')
@@ -246,7 +273,9 @@ class Engine:
                     for name in names:
                         add(Path(base)/name,'files')
                 if errors:
-                    raise OSError(f'Cannot read part of {source}; previous index retained: {errors[0]}')
+                    for error in errors:
+                        skipped+=1
+                        logging.getLogger('vectordash').warning('Skipped inaccessible folder: %s',error)
             if settings.get('code_enabled'):
                 for root in settings.get('code_roots',[]):
                     if not Path(root).is_dir():
@@ -293,7 +322,7 @@ class Engine:
             try:
                 with self.inference:
                     prompt=('task: code retrieval | query: ' if code else 'task: search result | query: ')+query
-                    vector=embed(prompt)
+                    vector=embed(prompt,request=lambda text:embedding_request(text,settings)) if settings.get('server_mode')=='Remote' else embed(prompt)
             finally:
                 self.query_waiting.clear()
         tokens=re.findall(r'[\w]+(?:[-./:][\w]+)*',query.casefold())

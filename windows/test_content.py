@@ -105,15 +105,25 @@ class ContentTests(unittest.TestCase):
             self.engine.index(dict(self.settings,ocr_languages='eng+ara'))
         self.assertTrue(self.engine.search('updated',self.settings))
 
-    def test_runtime_failure_preserves_segments_and_fulltext(self):
-        path=self.source/'notes.txt'; path.write_text('retained invoice INV-1299')
+    def test_file_failure_skips_partial_content_and_continues(self):
+        path=self.source/'notes.txt'; path.write_text('old invoice INV-1299')
         self.engine.index(self.settings)
-        path.write_text('replacement which must not commit')
-        with patch('engine.extract',side_effect=RuntimeError('decode failed')):
-            with self.assertRaisesRegex(RuntimeError,'decode failed'):
-                self.engine.index(self.settings)
-        self.assertTrue(self.engine.search('INV-1299',self.settings))
-        self.assertEqual(self.engine.search('replacement',self.settings),[])
+        path.write_text('bad replacement')
+        (self.source/'good.txt').write_text('healthy content after failure')
+        from content import Segment
+        original=__import__('engine').extract
+        def extract(path,*args):
+            if path.name=='notes.txt':
+                yield Segment(text='partial text that must not commit')
+                raise RuntimeError('decode failed')
+            yield from original(path,*args)
+        with patch('engine.extract',side_effect=extract),self.assertLogs('vectordash',level='WARNING') as logs:
+            summary=self.engine.index(self.settings)
+        self.assertIn('1 skipped',summary)
+        self.assertIn('decode failed',logs.output[0])
+        self.assertTrue(self.engine.search('healthy',self.settings))
+        self.assertEqual(self.engine.search('partial',self.settings),[])
+        self.assertTrue(self.engine.search('notes',self.settings))
 
     def test_duplicate_source_selection_does_not_duplicate_segments(self):
         (self.source/'notes.txt').write_text('selected twice')

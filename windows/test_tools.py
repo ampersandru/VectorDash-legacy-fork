@@ -53,7 +53,7 @@ class ToolTests(unittest.TestCase):
         program='C:/Programs/Tesseract-OCR/tesseract.exe'
         process=Mock(returncode=0)
         data={'tree':[{'type':'blob','path':'eng.traineddata','size':10,'sha':'abc123'}]}
-        with patch('setup_tools.ocr_program',side_effect=[None,None,program]),patch('setup_tools.shutil.which',return_value='winget.exe'),patch('setup_tools.subprocess.Popen',return_value=process) as launch,patch('setup_tools.check_program'),patch('setup_tools.fetch_json',side_effect=[{'sha':'pinned-revision'},data]),patch('setup_tools.download') as get,patch('setup_tools.subprocess.run',return_value=Mock(returncode=0,stdout='List of languages:\neng\n')):
+        with patch('setup_tools.ocr_program',side_effect=[None,None,program]),patch('setup_tools.shutil.which',return_value='winget.exe'),patch('setup_tools.subprocess.Popen',return_value=process) as launch,patch('setup_tools.check_program'),patch('setup_tools.fetch_json',side_effect=[{'sha':'pinned-revision'},data]),patch('setup_tools.download') as get,patch('setup_tools.process_lifecycle.run',return_value=Mock(returncode=0,stdout='List of languages:\neng\n')):
             result=install_ocr({'ocr_languages':'eng'},self.home,self.cancel,lambda *args:None)
         args=launch.call_args.args[0]
         self.assertIn('UB-Mannheim.TesseractOCR',args)
@@ -71,7 +71,7 @@ class ToolTests(unittest.TestCase):
         row='5\t1\t1\t1\t1\t1\t20\t30\t80\t15\t96\tINV-2026_8832\n'
         data=(header+row).encode()
         settings={'ocr_path':'C:/OCR/tesseract.exe','ocr_data':'C:/Users/A User/OCR data','ocr_languages':'eng'}
-        with patch('content.ocr_program',return_value=settings['ocr_path']),patch('content.subprocess.run',return_value=Mock(returncode=0,stdout=data)) as run:
+        with patch('content.ocr_program',return_value=settings['ocr_path']),patch('content.process_lifecycle.run',return_value=Mock(returncode=0,stdout=data)) as run:
             text,boxes=ocr(Image.new('RGB',(100,100),'white'),settings)
         self.assertEqual(text,'INV-2026_8832')
         self.assertEqual(boxes,[['INV-2026_8832',20,30,80,15]])
@@ -86,7 +86,7 @@ class ToolTests(unittest.TestCase):
 
     def test_invalid_manual_path_reuses_detected_existing_ocr(self):
         program='C:/Programs/tesseract.exe'
-        with patch('setup_tools.ocr_program',side_effect=[None,program]),patch('setup_tools.check_program'),patch('setup_tools.fetch_json',side_effect=[{'sha':'rev'},{'tree':[{'type':'blob','path':'eng.traineddata','size':1,'sha':'abc'}]}]),patch('setup_tools.download'),patch('setup_tools.subprocess.run',return_value=Mock(returncode=0,stdout='eng\n')),patch('setup_tools.subprocess.Popen') as launch:
+        with patch('setup_tools.ocr_program',side_effect=[None,program]),patch('setup_tools.check_program'),patch('setup_tools.fetch_json',side_effect=[{'sha':'rev'},{'tree':[{'type':'blob','path':'eng.traineddata','size':1,'sha':'abc'}]}]),patch('setup_tools.download'),patch('setup_tools.process_lifecycle.run',return_value=Mock(returncode=0,stdout='eng\n')),patch('setup_tools.subprocess.Popen') as launch:
             result=install_ocr({'ocr_path':'invalid.exe','ocr_languages':'eng'},self.home,self.cancel,lambda *args:None)
         launch.assert_not_called()
         self.assertEqual(result['ocr_path'],program)

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import process_lifecycle
 import sys
 
 HOTKEY_ID = 0xD160
@@ -105,7 +106,7 @@ def gpu_utilization():
         return None
     script = r"$ErrorActionPreference='Stop'; $v=(Get-Counter '\GPU Engine(*)\Utilization Percentage').CounterSamples | Where-Object CookedValue -ge 0 | Measure-Object CookedValue -Sum; if ($null -ne $v.Sum) { [Console]::WriteLine($v.Sum.ToString([Globalization.CultureInfo]::InvariantCulture)) }"
     try:
-        result = subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',script],capture_output=True,text=True,timeout=8,creationflags=subprocess.CREATE_NO_WINDOW)
+        result = process_lifecycle.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',script],capture_output=True,text=True,timeout=8,creationflags=subprocess.CREATE_NO_WINDOW)
         return min(100.0,max(0.0,float(result.stdout.strip()))) if result.returncode == 0 else None
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None

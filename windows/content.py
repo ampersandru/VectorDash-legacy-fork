@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import process_lifecycle
 import tempfile
 import threading
 import wave
@@ -79,7 +80,7 @@ def ocr(image, settings):
         args+=['--tessdata-dir',str(Path(settings['ocr_data']))]
     # Use literal subprocess arguments; wrappers can leave quotes inside Windows
     # data paths containing spaces. PNG stdin also avoids temporary image files.
-    result=subprocess.run(args,input=buffer.getvalue(),capture_output=True,timeout=90,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    result=process_lifecycle.run(args,input=buffer.getvalue(),capture_output=True,timeout=90,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     if result.returncode:
         raise RuntimeError('OCR failed: '+result.stderr.decode('utf-8',errors='replace')[-1000:])
     words=[]
@@ -104,7 +105,7 @@ def ffmpeg(settings):
     return configured or shutil.which('ffmpeg') or imageio_ffmpeg.get_ffmpeg_exe()
 
 def process(args):
-    return subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    return process_lifecycle.popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
 
 def audio_segments(path,settings,checkpoint):
     """Decode one bounded PCM stream; overlapping windows retain speech context."""
@@ -245,10 +246,10 @@ def extract(path,settings,read_text,checkpoint):
 def project_files(root):
     root=Path(root).resolve()
     try:
-        top=subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,timeout=10,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        top=process_lifecycle.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,timeout=10,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         if top.returncode==0:
             repo=Path(top.stdout.decode().strip()).resolve()
-            result=subprocess.run(['git','-C',str(repo),'ls-files','--cached','--others','--exclude-standard','-z'],capture_output=True,timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            result=process_lifecycle.run(['git','-C',str(repo),'ls-files','--cached','--others','--exclude-standard','-z'],capture_output=True,timeout=30,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
             if result.returncode:
                 raise RuntimeError('Cannot read project files with Git')
             for name in result.stdout.decode('utf-8',errors='replace').split('\0'):

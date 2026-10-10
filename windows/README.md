@@ -3,8 +3,8 @@
 Search your local files by their meaning and exact words. VectorDash is a Windows
 fork of [ARahim3/DigUp](https://github.com/ARahim3/DigUp), powered by
 [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) and llama.cpp.
-Your selected files and queries stay on your PC. Internet access is used for
-runtime/model catalogs and downloads.
+In local mode your selected files and queries stay on your PC. Remote mode
+sends them to the server you configure. Internet access also supplies setup downloads.
 
 ## Start
 
@@ -53,7 +53,7 @@ Python functions and common brace-based language functions retain their names an
 line ranges; other languages use source passages. Notebook outputs are excluded.
 
 An update reuses unchanged content and removes deleted files. Changes to the
-model, encoder or content options cause reindexing. A failed embedding or a stopped
+model, encoder or content options cause reindexing. A stopped
 update preserves the previous committed index. Search remains available during
 indexing; interactive requests get priority between embedding requests.
 
@@ -72,7 +72,8 @@ readiness. CPU mode disables both language-model and encoder GPU offload.
 
 Downloads resume and are pinned to the catalog revision/release. Model and encoder
 SHA-256 hashes are checked. Runtime hashes are checked when supplied by GitHub.
-The server binds to loopback port 8787. VectorDash only stops servers it started.
+Local servers bind to loopback port 8787. Exit stops owned helpers and a verified
+matching local server; remote hosts continue running.
 An external server must be stopped from its original application before changing
 its model/encoder.
 
@@ -127,7 +128,7 @@ searchable by filename. HTML/RTF retain markup. Animated images use their first 
 Function detection outside Python is a best-effort source parser.
 
 New installations use `%LOCALAPPDATA%\VectorDash`. Existing Windows installations
-reuse `%LOCALAPPDATA%\DigUp` so settings, downloads and indexes remain intact.
+automatically move `%LOCALAPPDATA%\DigUp` to `%LOCALAPPDATA%\VectorDash`, updating managed paths and preserving settings, downloads and indexes. Exit the previous app before upgrading.
 The data folder contains `settings.json`, `index.sqlite` and `model.log`.
 
 ## Validation
@@ -156,3 +157,42 @@ Swift/macOS sources come from the upstream project.
 Based on [DigUp](https://github.com/ARahim3/DigUp). Original code/license notices
 are retained; see [LICENSE](../LICENSE). Model/runtime/OCR dependencies carry their
 own licenses.
+
+
+## Guided setup, connection status and logs
+
+The first card in **Models & hardware** is **One-click setup**. Choose hardware
+and quantization below it, then click **Download, install and start**. It installs
+missing llama-server, the selected EmbeddingGemma 2 GGUF and matching encoder,
+managed FFmpeg, and (when enabled) Tesseract plus your chosen OCR languages.
+Installed components are reused. The checklist and Settings report model/feature
+readiness, and model status is checked periodically. Downloads can be cancelled.
+
+Choose **Remote** in Server connection to use an existing EmbeddingGemma 2
+llama-server. Enter its full HTTP(S) URL, optional API key and model identifier
+reported by `/props`, then save and connect. The remote server needs embedding
+mode and a matching encoder for images/audio. Remote mode sends selected file
+content and queries to that host. Its model identity must match the configured
+identifier; changing the server or identifier requires reindexing. VectorDash
+does not download models onto or stop a remote machine.
+
+**Sources** has live indexing activity, Pause/resume and Cancel. Its progress
+indicator remains active until the traversal finishes because the file count is
+not known beforehand. During active indexing the tray/window magnifying glass
+animates in red; it becomes static purple while paused or stopped. File-specific
+failures, including Pillow's oversized-image protection, are logged and skipped;
+partial segments for a failed file are removed, while its filename stays searchable.
+Cancellation and database/source configuration failures retain the completed index.
+
+**Logs** filters All, Verbose, Info, Warning and Error and opens the persistent
+`vectordash.log`. The separate `model.log` contains llama-server output.
+**Exit VectorDash** stops its local model and helper process tree (OCR, decoder,
+installer and device probes), and blocks new helpers during shutdown. A matching
+existing local llama-server is also stopped on exit only after its configured
+executable, model and listening port have been verified. Closing to tray continues
+background work according to your window settings.
+
+The Windows application is newly written Python/Qt code. It does not compile or
+import the original macOS Swift application; the fork retains the original source,
+resources and MIT attribution. A standalone Windows repository is a reasonable
+future home for VectorDash if the macOS implementation will not be maintained here.
