@@ -22,3 +22,7 @@ evals/*.local.json
 
 # Windows Python app
 windows/__pycache__/
+
+windows/.venv/
+windows/*.local.png
+windows/.smoke/
