@@ -319,7 +319,8 @@ class Desktop(QMainWindow):
             if self.settings['startup']:
                 set_startup(True)
         except (OSError,ValueError) as error:
-            self.set_status(str(error))
+            self.set_status('Quick-search shortcut unavailable. You can still use VectorDash; choose another shortcut in Settings.')
+        self.update_hotkey_status()
         self.clock=QTimer(self)
         self.clock.setInterval(15000)
         self.clock.timeout.connect(self.tick)
@@ -627,6 +628,8 @@ class Desktop(QMainWindow):
         frame,inside=card('Appearance and shortcut')
         self.field(inside,'theme','Appearance','combo',['System','Light','Dark'])
         self.field(inside,'hotkey','Global quick-search shortcut')
+        self.shortcut_state=label('','muted')
+        inside.addWidget(self.shortcut_state)
         inside.addWidget(label('Use Ctrl, Alt, Shift or Win plus Space, a letter, digit or function key. Conflicts are reported.','muted'))
         layout.addWidget(frame)
         frame,inside=card('Startup and window behavior')
@@ -676,7 +679,7 @@ class Desktop(QMainWindow):
             return False
         old_shortcut=self.settings['hotkey']
         try:
-            if values['hotkey']!=self.hotkey.current:
+            if values['hotkey']!=old_shortcut:
                 self.hotkey.register(values['hotkey'])
             if values['startup']!=self.settings['startup']:
                 set_startup(values['startup'])
@@ -700,10 +703,18 @@ class Desktop(QMainWindow):
         self.store.save()
         self.apply_theme()
         self.update_tool_state()
-        self.shortcut_hint.setText(f'Describe a file, or press {values["hotkey"]} from any app.')
+        self.update_hotkey_status()
         if not quiet:
             self.set_status('Settings saved')
         return True
+
+    def update_hotkey_status(self):
+        if self.hotkey.current:
+            self.shortcut_state.setText('Shortcut active: '+self.hotkey.current)
+            self.shortcut_hint.setText('Describe a file, or press '+self.hotkey.current+' from any app.')
+        else:
+            self.shortcut_state.setText('Shortcut unavailable: another app is using it. Choose a different combination and Apply settings. Search and indexing still work.')
+            self.shortcut_hint.setText('Describe a file. Quick-search shortcut unavailable; change it in Settings.')
 
     def apply_theme(self):
         theme=self.settings['theme']
