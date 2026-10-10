@@ -1,4 +1,4 @@
-"""Modern DigUp Windows desktop, quick search, setup and scheduling."""
+"""Modern VectorDash Windows desktop, quick search, setup and scheduling."""
 import ctypes
 from ctypes import wintypes
 from datetime import datetime
@@ -17,7 +17,8 @@ from PySide6.QtCore import Qt, QObject, Signal, QTimer, QTime, QAbstractNativeEv
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut, QCursor, QPainter, QColor, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QStackedWidget, QComboBox, QCheckBox, QSpinBox, QTimeEdit, QFileDialog, QMessageBox, QFrame, QSystemTrayIcon, QMenu, QProgressBar, QScrollArea, QFileIconProvider, QAbstractItemView)
-from engine import Engine, Settings, verify_server_model
+from engine import Engine, Settings, SearchResult, verify_server_model
+from previews import Preview
 from digup_windows import command, embed
 from windows_integration import GlobalHotkey, HOTKEY_ID, set_startup, parse_devices, idle_seconds, gpu_utilization
 from scheduling import schedule_due, idle_allowed, next_run
@@ -107,9 +108,10 @@ class Results(QListWidget):
         self.itemActivated.connect(lambda item:owner.open_file(item.data(Qt.ItemDataRole.UserRole)))
     def populate(self, results):
         self.clear()
-        for score,path,snippet in results:
+        for result in results:
+            score,path,snippet = result
             item=QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole,path)
+            item.setData(Qt.ItemDataRole.UserRole,result if isinstance(result,SearchResult) else path)
             item.setToolTip(path)
             widget=QWidget()
             layout=QHBoxLayout(widget)
@@ -120,7 +122,7 @@ class Results(QListWidget):
             content=QVBoxLayout()
             content.setSpacing(3)
             content.addWidget(label(Path(path).name,'resultTitle'))
-            content.addWidget(label(path,'muted'))
+            content.addWidget(label((result.location()+' · ' if isinstance(result,SearchResult) else '')+path,'muted'))
             if snippet:
                 content.addWidget(label(snippet,'snippet'))
             layout.addLayout(content,1)
@@ -130,6 +132,10 @@ class Results(QListWidget):
         if self.count():
             self.setCurrentRow(0)
     def selected_path(self):
+        item=self.currentItem()
+        value=item.data(Qt.ItemDataRole.UserRole) if item else None
+        return value.path if isinstance(value,SearchResult) else value
+    def selected_result(self):
         item=self.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
@@ -149,13 +155,13 @@ class QuickSearch(QWidget):
     def __init__(self, owner):
         super().__init__(None,Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         self.owner=owner
-        self.setWindowTitle('DigUp Quick Search')
+        self.setWindowTitle('VectorDash Quick Search')
         self.setWindowIcon(owner.windowIcon())
         self.setObjectName('quickSearch')
         self.resize(760,470)
         layout=QVBoxLayout(self)
         layout.setContentsMargins(20,20,20,16)
-        layout.addWidget(row(label('DigUp','cardTitle'),button('Open full app',self.full)))
+        layout.addWidget(row(label('VectorDash','cardTitle'),button('Open full app',self.full)))
         self.results=Results(owner)
         self.input=SearchEdit(self.results)
         layout.addWidget(self.input)
@@ -167,7 +173,7 @@ class QuickSearch(QWidget):
         self.timer.setInterval(300)
         self.timer.timeout.connect(lambda:owner.request_search(self.input.text()))
         self.input.textChanged.connect(lambda:self.changed())
-        self.input.returnPressed.connect(lambda:owner.open_file(self.results.selected_path()) if self.results.count() else owner.request_search(self.input.text()))
+        self.input.returnPressed.connect(lambda:owner.open_file(self.results.selected_result()) if self.results.count() else owner.request_search(self.input.text()))
         QShortcut(QKeySequence('Escape'),self,activated=self.hide)
     def changed(self):
         self.results.clear()
@@ -217,7 +223,7 @@ class Desktop(QMainWindow):
         self.runtimes=[]
         self.models=[]
         self.shutting_down=False
-        self.setWindowTitle('DigUp')
+        self.setWindowTitle('VectorDash')
         self.setWindowIcon(app_icon())
         self.resize(1120,820)
         self.setMinimumSize(850,620)
@@ -238,15 +244,15 @@ class Desktop(QMainWindow):
         self.tray=QSystemTrayIcon(self.windowIcon(),self)
         menu=QMenu()
         menu.addAction('Quick search',self.toggle_quick)
-        menu.addAction('Open DigUp',lambda:self.show_main())
+        menu.addAction('Open VectorDash',lambda:self.show_main())
         menu.addSeparator()
         menu.addAction('Pause / resume indexing',self.pause_index)
         menu.addAction('Update index',lambda:self.start_index())
         menu.addAction('Settings',lambda:self.show_main(4))
         menu.addSeparator()
-        menu.addAction('Exit DigUp',self.exit_app)
+        menu.addAction('Exit VectorDash',self.exit_app)
         self.tray.setContextMenu(menu)
-        self.tray.setToolTip('DigUp • local file search')
+        self.tray.setToolTip('VectorDash • local file search')
         self.tray.activated.connect(lambda reason:self.toggle_quick() if reason==QSystemTrayIcon.ActivationReason.Trigger else None)
         self.tray.show()
         if ipc:
@@ -254,6 +260,8 @@ class Desktop(QMainWindow):
         self.apply_theme()
         try:
             self.hotkey.register(self.settings['hotkey'])
+            if self.settings['startup']:
+                set_startup(True)
         except (OSError,ValueError) as error:
             self.set_status(str(error))
         self.clock=QTimer(self)
@@ -283,7 +291,7 @@ class Desktop(QMainWindow):
         nav=QVBoxLayout(sidebar)
         nav.setContentsMargins(20,30,16,18)
         nav.setSpacing(12)
-        nav.addWidget(label('DigUp','brand'))
+        nav.addWidget(label('VectorDash','brand'))
         nav.addWidget(label('Find what you remember.','muted'))
         nav.addSpacing(28)
         self.navigation=QListWidget()
@@ -368,17 +376,17 @@ class Desktop(QMainWindow):
         self.search_hint=label('Type to search your indexed files.','muted')
         layout.addWidget(self.search_hint)
         layout.addWidget(self.results,1)
-        layout.addWidget(row(button('Open',lambda:self.open_file(self.results.selected_path()),True),button('Show in Explorer',self.reveal),button('Copy path',self.copy_path)))
+        layout.addWidget(row(button('Open',lambda:self.open_file(self.results.selected_result()),True),button('Show in Explorer',self.reveal),button('Copy path',self.copy_path)))
         self.stack.addWidget(page)
         self.search_timer=QTimer(self)
         self.search_timer.setSingleShot(True)
         self.search_timer.setInterval(300)
         self.search_timer.timeout.connect(lambda:self.request_search(self.query.text()))
         self.query.textChanged.connect(self.query_changed)
-        self.query.returnPressed.connect(lambda:self.open_file(self.results.selected_path()) if self.results.count() else self.request_search(self.query.text()))
+        self.query.returnPressed.connect(lambda:self.open_file(self.results.selected_result()) if self.results.count() else self.request_search(self.query.text()))
 
     def sources_page(self):
-        layout=self.page('Your sources','Choose the drives and folders DigUp can read.')
+        layout=self.page('Your sources','Choose the drives and folders VectorDash can read.')
         frame,inside=card('Drives and folders','Hidden/system folders, cloud placeholders and common secrets are skipped.')
         self.sources=QListWidget()
         self.sources.setMinimumHeight(180)
@@ -390,12 +398,37 @@ class Desktop(QMainWindow):
             self.drives.addItems([f'{chr(65+i)}:\\' for i in range(26) if mask & (1<<i)])
         inside.addWidget(row(button('Add folder…',self.add_folder,True),self.drives,button('Add drive',lambda:self.add_source(self.drives.currentText())),button('Remove',self.remove_source)))
         layout.addWidget(frame)
+        frame,inside=card('Search file contents','Photos, audio and video require semantic search and the matching vision + audio encoder. PDFs retain their page numbers.')
+        for key,title in [('index_images','Photos and screenshots'),('index_audio','Audio and video soundtracks'),('index_video','Video frames'),('ocr_enabled','Read text in screenshots and scanned PDFs')]:
+            self.field(inside,key,title,'check')
+        self.field(inside,'video_interval','Seconds between sampled video frames','spin',minimum=1,maximum=30)
+        inside.addWidget(label('Scene changes are also sampled. A brief event between frames can be missed; use 1 second for finer coverage. Audio uses overlapping 30-second windows.','muted'))
+        self.field(inside,'ocr_path','Tesseract executable (blank = detect installed copy)')
+        inside.addWidget(row(button('Browse OCR executable…',lambda:self.browse('ocr_path')),button('OCR installation help',lambda:self.open_file('https://tesseract-ocr.github.io/tessdoc/Installation.html'))))
+        self.field(inside,'ocr_languages','OCR languages, e.g. eng+ben+ara (installed language packs required)')
+        self.field(inside,'ffmpeg_path','FFmpeg executable (blank = installed or bundled copy)')
+        inside.addWidget(label('Tesseract is required for exact screenshot text and scanned PDFs. EmbeddingGemma searches multilingual text and visual/audio meaning locally.','muted'))
+        layout.addWidget(frame)
+        frame,inside=card('Code search','Opt in, choose project folders, then prefix your query with code:. Git ignored files are excluded.')
+        self.field(inside,'code_enabled','Enable code search','check')
+        self.code_sources=QListWidget()
+        self.code_sources.addItems(self.settings.get('code_roots',[]))
+        self.code_sources.setMinimumHeight(100)
+        inside.addWidget(self.code_sources)
+        inside.addWidget(row(button('Add project…',self.add_project),button('Remove project',lambda:self.code_sources.takeItem(self.code_sources.currentRow()))))
+        inside.addWidget(button('Save content settings',self.save,True))
+        layout.addWidget(frame)
         frame,inside=card('Indexing','Updates reuse unchanged files. A full rebuild recalculates every vector.')
         inside.addWidget(row(button('Update index',lambda:self.start_index(),True),button('Full rebuild',lambda:self.start_index(force=True)),button('Pause / resume',self.pause_index),button('Stop',self.engine.cancel.set)))
         self.index_status=label('No indexing task running.','muted')
         inside.addWidget(self.index_status)
         layout.addWidget(frame)
         layout.addStretch()
+
+    def add_project(self):
+        path=QFileDialog.getExistingDirectory(self,'Choose a project folder')
+        if path and path not in [self.code_sources.item(i).text() for i in range(self.code_sources.count())]:
+            self.code_sources.addItem(path)
 
     def models_page(self):
         layout=self.page('Models & hardware','Set up local semantic search, or keep using filename and text search.')
@@ -406,10 +439,10 @@ class Desktop(QMainWindow):
         self.devices.addItem(self.settings['device'] or 'Select an adapter',self.settings['device'])
         inside.addWidget(label('Inference device'))
         inside.addWidget(row(self.devices,button('Refresh devices',self.refresh_devices)))
-        for key,title in [('server','llama-server executable'),('model','Embedding model (GGUF)')]:
+        for key,title in [('server','llama-server executable'),('model','Embedding model (GGUF)'),('projector','Vision + audio encoder (matching mmproj GGUF)')]:
             self.field(inside,key,title)
             inside.addWidget(button('Browse…',lambda checked=False,k=key:self.browse(k)))
-        self.field(inside,'auto_model','Start model automatically when DigUp starts','check')
+        self.field(inside,'auto_model','Start model automatically when VectorDash starts','check')
         inside.addWidget(row(button('Save hardware settings',self.save,True),button('Start model',self.start_model),button('Stop model',self.stop_model),button('Test embedding',self.test_model)))
         self.model_state=label('Model readiness is checked when starting or testing.','muted')
         inside.addWidget(self.model_state)
@@ -429,13 +462,13 @@ class Desktop(QMainWindow):
         self.download_bar=QProgressBar()
         self.download_bar.setValue(0)
         inside.addWidget(self.download_bar)
-        inside.addWidget(row(button('Install runtime',lambda:self.install('server'),True),button('Download model',lambda:self.install('model'),True),button('Cancel download',self.download_cancel.set)))
+        inside.addWidget(row(button('Install runtime',lambda:self.install('server'),True),button('Download model + encoder',lambda:self.install('model'),True),button('Encoder only',lambda:self.install('projector')),button('Cancel download',self.download_cancel.set)))
         inside.addWidget(label('Downloads are resumable. Models are checked against SHA-256. Runtime checksums are verified when supplied by GitHub. Existing paths remain available.','muted'))
         layout.addWidget(frame)
         layout.addStretch()
 
     def schedule_page(self):
-        layout=self.page('Scheduling','Keep your index current while DigUp runs in the background.')
+        layout=self.page('Scheduling','Keep your index current while VectorDash runs in the background.')
         frame,inside=card('When to update','Scheduled updates reuse unchanged files and never overlap.')
         self.field(inside,'schedule_mode','Schedule','combo',['Manual','At selected time','When idle','Time + idle'])
         self.field(inside,'schedule_time','Time (this PC’s local time)','time')
@@ -478,19 +511,19 @@ class Desktop(QMainWindow):
         self.history.addItems(self.settings.get('schedule_history',[]))
         inside.addWidget(self.history)
         inside.addWidget(button('Update now',lambda:self.start_index()))
-        inside.addWidget(label('Missed runs are handled once after resume. DigUp must be running; it does not wake a sleeping PC.','muted'))
+        inside.addWidget(label('Missed runs are handled once after resume. VectorDash must be running; it does not wake a sleeping PC.','muted'))
         layout.addWidget(frame)
         layout.addStretch()
 
     def settings_page(self):
-        layout=self.page('Settings','Make DigUp fit the way you use Windows.')
+        layout=self.page('Settings','Make VectorDash fit the way you use Windows.')
         frame,inside=card('Appearance and shortcut')
         self.field(inside,'theme','Appearance','combo',['System','Light','Dark'])
         self.field(inside,'hotkey','Global quick-search shortcut')
         inside.addWidget(label('Use Ctrl, Alt, Shift or Win plus Space, a letter, digit or function key. Conflicts are reported.','muted'))
         layout.addWidget(frame)
         frame,inside=card('Startup and window behavior')
-        self.field(inside,'startup','Start DigUp when I sign in to Windows','check')
+        self.field(inside,'startup','Start VectorDash when I sign in to Windows','check')
         self.field(inside,'start_hidden','Start hidden in the system tray at sign-in','check')
         self.field(inside,'close_behavior','When I close the window','combo',['Hide to tray','Minimize to taskbar','Exit'])
         self.field(inside,'minimize_behavior','When I minimize the window','combo',['Taskbar','Tray'])
@@ -500,7 +533,7 @@ class Desktop(QMainWindow):
         frame,inside=card('Local data')
         inside.addWidget(label(str(self.store.home),'muted'))
         inside.addWidget(button('Open data folder',lambda:self.open_file(str(self.store.home))))
-        inside.addWidget(button('Exit DigUp',self.exit_app))
+        inside.addWidget(button('Exit VectorDash',self.exit_app))
         layout.addWidget(frame)
         layout.addStretch()
 
@@ -518,6 +551,7 @@ class Desktop(QMainWindow):
             else:
                 values[key]=widget.text().strip()
         values['roots']=[self.sources.item(i).text() for i in range(self.sources.count())]
+        values['code_roots']=[self.code_sources.item(i).text() for i in range(self.code_sources.count())]
         values['device']=self.devices.currentData() or ''
         values['schedule_days']=[i for i,check in enumerate(self.day_checks) if check.isChecked()]
         return values
@@ -612,7 +646,7 @@ class Desktop(QMainWindow):
 
     def error(self,text):
         self.set_status(text)
-        QMessageBox.warning(self,'DigUp',text)
+        QMessageBox.warning(self,'VectorDash',text)
 
     def set_status(self,text):
         self.status.setText(text)
@@ -669,8 +703,8 @@ class Desktop(QMainWindow):
             return
         if not scheduled and not self.save(quiet=True):
             return
-        if not self.settings['roots']:
-            self.set_status('Add a folder or drive before indexing')
+        if not self.settings['roots'] and not (self.settings.get('code_enabled') and self.settings.get('code_roots')):
+            self.set_status('Add a folder, drive or enabled code project before indexing')
             return
         self.engine.cancel.clear()
         self.engine.paused.clear()
@@ -775,9 +809,21 @@ class Desktop(QMainWindow):
         if not path:
             return
         try:
+            if isinstance(path,SearchResult):
+                result=path
+                from content import CODE
+                if Path(result.path).suffix.lower() in CODE and result.kind!='code':
+                    result.kind='code'
+                    result.line=result.end_line=1
+                if result.page or result.seconds>=0 or result.kind in ('image','code'):
+                    preview=Preview(result,self)
+                    preview.show()
+                    self.quick.hide()
+                    return
+                path=result.path
             os.startfile(path)
             self.quick.hide()
-        except OSError as error:
+        except Exception as error:
             self.error(str(error))
 
     def reveal(self):
@@ -790,7 +836,7 @@ class Desktop(QMainWindow):
             self.set_status('Path copied')
 
     def browse(self,key):
-        path,_=QFileDialog.getOpenFileName(self,'Choose '+key,'','Executable (*.exe)' if key=='server' else 'GGUF model (*.gguf)')
+        path,_=QFileDialog.getOpenFileName(self,'Choose '+key,'','Executable (*.exe)' if key in ('server','ocr_path','ffmpeg_path') else 'GGUF model (*.gguf)')
         if path:
             self.widgets[key].setText(path)
 
@@ -830,6 +876,8 @@ class Desktop(QMainWindow):
         try:
             if not Path(self.settings['server']).is_file() or not Path(self.settings['model']).is_file():
                 raise ValueError('Choose or download a runtime and model first.')
+            if self.settings.get('projector') and not Path(self.settings['projector']).is_file():
+                raise ValueError('The selected vision/audio encoder does not exist. Download it or choose its mmproj GGUF file.')
             with net_socket.socket() as probe:
                 occupied=probe.connect_ex(('127.0.0.1',8787))==0
             if occupied:
@@ -894,12 +942,21 @@ class Desktop(QMainWindow):
         self.model_status('Local model stopped' if process else 'No model owned by this app. An external server must be stopped from its original app.')
 
     def test_model(self):
+        if not self.save(quiet=True):
+            return
+        snapshot=dict(self.settings,semantic=True)
         self.model_state.setText('Testing a local embedding request…')
         def work():
             try:
+                verify_server_model(snapshot)
                 with self.engine.inference:
-                    vector=embed('A document about Windows desktop search')
-                self.events.model.emit(f'Embedding test passed · {len(vector)} dimensions')
+                    vector=embed('task: search result | query: A document about Windows desktop search')
+                with urllib.request.urlopen('http://127.0.0.1:8787/props',timeout=5) as response:
+                    modalities=json.load(response).get('modalities',{})
+                ready=modalities.get('vision') and modalities.get('audio')
+                if snapshot.get('projector') and not ready:
+                    raise ValueError('The running server has no vision/audio encoder. Stop it and start the model with the selected encoder.')
+                self.events.model.emit(f'Embedding test passed · {len(vector)} dimensions · '+('text + vision + audio ready' if ready else 'text only; download/select an encoder and restart for media search'))
             except Exception as error:
                 self.events.model.emit('Embedding test failed: '+str(error))
         self.launch(work)
@@ -939,7 +996,7 @@ class Desktop(QMainWindow):
         r=self.runtime_choice.currentIndex()
         q=self.quant_choice.currentIndex()
         if 0<=r<len(self.runtimes) and 0<=q<len(self.models):
-            total=self.runtimes[r]['size']+self.models[q]['size']
+            total=self.runtimes[r]['size']+self.models[q]['size']+self.models[q].get('projector',{}).get('size',0)
             self.download_summary.setText(f'Total download: {total/1024**2:.0f} MB. Model SHA-256 verified. Choose the runtime for your hardware; existing installations are retained.')
 
     def install(self,key):
@@ -952,6 +1009,11 @@ class Desktop(QMainWindow):
             self.set_status('Load the download catalog first')
             return
         item=choices[index]
+        if key=='projector':
+            item=item.get('projector')
+            if not item:
+                self.error('No matching vision/audio encoder is available for this model.')
+                return
         self.download_cancel.clear()
         self.installing=True
         self.download_bar.setValue(0)
@@ -959,6 +1021,9 @@ class Desktop(QMainWindow):
             try:
                 function=install_runtime if key=='server' else install_model
                 path=function(item,self.store.home,self.download_cancel,self.events.progress.emit)
+                if key=='model' and item.get('projector'):
+                    encoder=install_model(item['projector'],self.store.home,self.download_cancel,self.events.progress.emit)
+                    path=json.dumps({'model':path,'projector':encoder})
                 self.events.installed.emit(key,path,'')
             except Exception as error:
                 self.events.installed.emit(key,'',str(error))
@@ -973,8 +1038,10 @@ class Desktop(QMainWindow):
         if error:
             self.set_status(error)
             return
-        self.widgets[key].setText(path)
-        self.settings[key]=path
+        paths=json.loads(path) if key=='model' and path.startswith('{') else {key:path}
+        for name,value in paths.items():
+            self.widgets[name].setText(value)
+            self.settings[name]=value
         self.store.save()
         self.download_bar.setValue(100)
         self.set_status('Installed. Refresh devices, select hardware, then start/test the model.' if key=='server' else 'Model downloaded and verified. Start/test the model, then update your index.')
@@ -1047,8 +1114,8 @@ class Desktop(QMainWindow):
 
 def main():
     app=QApplication(sys.argv)
-    app.setApplicationName('DigUp')
-    app.setOrganizationName('DigUp')
+    app.setApplicationName('VectorDash')
+    app.setOrganizationName('VectorDash')
     app.setStyle('Fusion')
     app.setQuitOnLastWindowClosed(False)
     settings=Settings()
@@ -1063,7 +1130,7 @@ def main():
     QLocalServer.removeServer(name)
     server=QLocalServer()
     if not server.listen(name):
-        QMessageBox.critical(None,'DigUp','Could not establish single-instance communication.')
+        QMessageBox.critical(None,'VectorDash','Could not establish single-instance communication.')
         return 1
     window=Desktop(settings,server)
     hidden='--startup' in sys.argv and settings.values['start_hidden'] and QSystemTrayIcon.isSystemTrayAvailable()

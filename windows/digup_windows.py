@@ -1,4 +1,6 @@
-"""DigUp Windows: local file search with optional llama.cpp text embeddings."""
+"""VectorDash: local multimodal file search with llama.cpp embeddings."""
+import os
+import base64
 import json
 import math
 import urllib.request
@@ -17,13 +19,13 @@ def read_text(path):
     if path.stat().st_size > 8 * 1024 * 1024:
         return ''
     if path.suffix.lower() in TEXT:
-        return path.read_text(encoding='utf-8', errors='replace')[:32000]
+        return path.read_text(encoding='utf-8', errors='replace')
     if path.suffix.lower() == '.docx':
         with zipfile.ZipFile(path) as z:
             if z.getinfo('word/document.xml').file_size > 8 * 1024 * 1024:
                 return ''
             root = ET.fromstring(z.read('word/document.xml'))
-            return ' '.join(root.itertext())[:32000]
+            return ' '.join(root.itertext())
     return ''
 
 def cosine(a, b):
@@ -34,6 +36,11 @@ def cosine(a, b):
 
 def command(settings):
     args = [settings['server'], '-m', settings['model'], '--embedding', '--host', '127.0.0.1', '--port', '8787', '-c', '2048', '--batch-size', '2048', '--ubatch-size', '2048', '--parallel', '1']
+    args += ['--pooling', 'mean']
+    if settings.get('projector'):
+        args += ['--mmproj', settings['projector'], '--image-min-tokens', '70', '--image-max-tokens', '280']
+        if settings['mode'] == 'CPU / system RAM':
+            args += ['--no-mmproj-offload']
     if settings['mode'] == 'CPU / system RAM':
         args += ['--device', 'none', '--gpu-layers', '0']
     else:
@@ -42,8 +49,18 @@ def command(settings):
         args += ['--device', settings['device'], '--gpu-layers', 'all']
     return args
 
+def server_url():
+    return os.environ.get('VECTORDASH_SERVER_URL','http://127.0.0.1:8787').rstrip('/')
+
 def embedding_request(text):
-    request = urllib.request.Request('http://127.0.0.1:8787/v1/embeddings', data=json.dumps({'input': text}).encode(), headers={'Content-Type': 'application/json'})
+    if isinstance(text, bytes):
+        with urllib.request.urlopen(server_url()+'/props', timeout=5) as response:
+            props=json.load(response)
+        marker=props.get('media_marker')
+        if not marker:
+            raise RuntimeError('This llama-server does not expose multimodal embeddings. Install a current runtime and its matching encoder.')
+        text={'prompt_string': marker, 'multimodal_data': [base64.b64encode(text).decode('ascii')]}
+    request = urllib.request.Request(server_url()+'/v1/embeddings', data=json.dumps({'input': text}).encode(), headers={'Content-Type': 'application/json'})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             vector = json.load(response)['data'][0]['embedding']

@@ -26,7 +26,7 @@ def hotkey_parts(text):
     elif re.fullmatch(r'f([1-9]|1[0-9]|2[0-4])', key):
         code = 0x70 + int(key[1:]) - 1
     else:
-        raise ValueError('Supported keys: Space, Enter, Tab, letters, digits, F1–F24.')
+        raise ValueError('Supported keys: Space, Enter, Tab, letters, digits, F1â€“F24.')
     return mask, code
 
 class GlobalHotkey:
@@ -62,10 +62,18 @@ def set_startup(enabled):
             if executable.name.lower() == 'python.exe':
                 executable = executable.with_name('pythonw.exe')
             command = subprocess.list2cmdline([str(executable), str(Path(__file__).with_name('desktop.py').resolve()), '--startup'])
-            winreg.SetValueEx(key, 'DigUp', 0, winreg.REG_SZ, command)
+            winreg.SetValueEx(key, 'VectorDash', 0, winreg.REG_SZ, command)
+            try:
+                winreg.DeleteValue(key,'DigUp')
+            except FileNotFoundError:
+                pass
         else:
             try:
-                winreg.DeleteValue(key, 'DigUp')
+                winreg.DeleteValue(key, 'VectorDash')
+            except FileNotFoundError:
+                pass
+            try:
+                winreg.DeleteValue(key,'DigUp')
             except FileNotFoundError:
                 pass
 

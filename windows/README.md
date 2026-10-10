@@ -1,124 +1,138 @@
-# DigUp for Windows 11
+# VectorDash for Windows 11
 
-A local Windows desktop app with a floating search panel, drive/folder selection,
-local semantic search, guided model setup, and background indexing schedules.
+Search your local files by their meaning and exact words. VectorDash is a Windows
+fork of [ARahim3/DigUp](https://github.com/ARahim3/DigUp), powered by
+[EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) and llama.cpp.
+Your selected files and queries stay on your PC. Internet access is used for
+runtime/model catalogs and downloads.
 
-## Run
+## Start
 
-Install Python 3.12 or later. Run `Setup-DigUp.cmd` once, then open
-`Run-DigUp.cmd`. Setup creates a local virtual environment with PySide6
-Essentials and psutil. The launcher opens the desktop without a console.
-This checkout already has its dependencies installed.
+Open [windows/Setup-VectorDash.cmd](Setup-VectorDash.cmd) once, then
+[windows/Run-VectorDash.cmd](Run-VectorDash.cmd). Python 3.12 or later is
+required. This checkout already has its dependencies installed.
 
-Close the previous DigUp window before opening this version. Existing settings,
-source selections, model paths and index entries are retained in
-`%LOCALAPPDATA%\DigUp`. Click **Sources → Update index** once after upgrading
-so the index gains file fingerprints and a model signature. Schema migration
-retains existing records; a failed/cancelled update retains the previous index.
+**Upgrading from the previous Windows port:** exit the old app from its tray,
+open VectorDash, then use **Models & hardware → Load available downloads →
+Encoder only**. Choose the quantization matching your existing EmbeddingGemma 2
+model. Stop the old model server from the app that started it, and start it again
+with the encoder selected. Enable semantic search, test the model, and use
+**Sources → Full rebuild**. Old filename/text vectors cannot identify photos.
+Existing settings and downloads are reused automatically.
 
-## Search and background behavior
+## Find the content
 
-- **Ctrl+Shift+Space** opens quick search from any app. Change the shortcut in
-  Settings. Registration conflicts are reported rather than silently ignored.
-- Search while typing; arrows select, Enter opens, Escape dismisses quick search.
-- The full app shows file icons, matching snippets, Explorer reveal and copy path.
-- Choose System, Light or Dark appearance.
-- Choose close behavior: Hide to tray, Minimize to taskbar, or Exit.
-- Choose minimize behavior: Taskbar or Tray.
-- Enable Start with Windows to register a per-user sign-in entry (no admin needed).
-  Optionally start hidden in the tray. This setting does not enable itself.
-- The tray provides quick search, main app, pause/resume, update, settings and Exit.
-- Reopening the app communicates with the existing instance.
+| Search | Result |
+| --- | --- |
+| `zebra in a video` | A sampled video frame; opens the original clip at that timestamp |
+| `where they talk about sleep` | An audio window; opens playback at the matching moment |
+| `the clause about pets in the lease` | The PDF page with matching words highlighted |
+| `a dog on the beach` | A photo matched by its image content |
+| `payment declined error` | A screenshot matched by image meaning and OCR text |
+| English, Bengali or Arabic descriptions | Matching notes across the model's supported languages |
+| `code: retry a failed call with backoff` | A source function or passage with its line numbers |
+| Invoice numbers, error codes and names | Literal matches in paths, documents and screenshot OCR |
 
-## Sources and index
+Search combines local semantic vectors, Unicode full-text matches and literal
+identifier matching. Each result shows its page, timestamp or source location.
+PDF/image highlights are preview overlays; original files are never annotated.
+Code opens in a read-only preview rather than running a script.
 
-Add folders or select drive letters. Only selected sources are read. Updates
-reuse unchanged content/vectors and remove entries for deleted files/removed
-sources. Full rebuild recalculates everything. Pause or stop from Sources or
-the tray. Search can continue while indexing; interactive embedding requests
-get priority at chunk boundaries. Missing roots and failed embeddings preserve
-the previous index.
+Images and audio use the model's actual vision/audio encoders. Audio is embedded
+directly; no cloud transcription or image captions are required. The model
+supports 100+ languages; retrieval quality varies with language and content.
 
-Text, Markdown, CSV, logs, HTML, RTF and DOCX have content extraction bounded to
-32,000 characters and 8 MiB per input file. HTML/RTF currently retain markup.
-Other files have filename search. Hidden/system folders, common credentials,
-cloud placeholders and directory junctions are skipped. This is a text-search
-port; PDF OCR and image/audio/video content understanding remain future work.
+## Choose what to index
 
-## Models and hardware
+Add drives/folders in **Sources**. Select photos, audio, video and OCR individually.
+PDF text is split by page and passage; scanned pages use OCR and visual embeddings.
+Code content is excluded from ordinary file search. To enable it, opt in and add
+project folders, then use the `code:` prefix. Git ignored files, hidden folders,
+common credential files and generated dependency/build folders are excluded.
+Python functions and common brace-based language functions retain their names and
+line ranges; other languages use source passages. Notebook outputs are excluded.
 
-Keep manual executable/GGUF paths, or use the built-in download flow:
+An update reuses unchanged content and removes deleted files. Changes to the
+model, encoder or content options cause reindexing. A failed embedding or a stopped
+update preserves the previous committed index. Search remains available during
+indexing; interactive requests get priority between embedding requests.
 
-1. Open Models & hardware → Load available downloads.
-2. Choose a CPU, CUDA or Vulkan Windows runtime and install it. CUDA runtime
-   companion DLL archives are installed when provided in the same release.
-3. Choose the EmbeddingGemma 2 quantization and download it. The official model
-   catalog currently offers Q8_0 and BF16; the list comes from the repository.
-4. Refresh devices and select the actual adapter from the dropdown.
-5. Choose CPU/system RAM, Dedicated GPU or Integrated GPU. Save, start the
-   model, and click Test embedding. Enable semantic search and update the index.
+## Model setup and hardware
 
-Runtime catalog: https://github.com/ggml-org/llama.cpp/releases
-Model catalog: https://huggingface.co/ggml-org/embeddinggemma-2-GGUF
+In **Models & hardware**, load the official catalogs, install a CPU/CUDA/Vulkan
+Windows runtime, then choose a model quantization. **Download model + encoder**
+installs and verifies both files; **Encoder only** keeps your existing model.
+Manual paths also work. A model GGUF alone only supports text: the matching
+`mmproj-embeddinggemma-2-*.gguf` is required for vision and audio.
 
-Downloads show sizes/progress and support cancel/resume. Models are verified
-against repository SHA-256; runtime asset digests are verified when supplied by
-GitHub. Runtime downloads are pinned to their release; models to their repository
-revision. Failed/corrupt downloads do not replace the selected path. Managed
-copies live in the data folder under models/runtimes; manual installations remain
-available. Catalog access/downloads require internet; file search stays local.
+Select CPU/system RAM, Dedicated GPU or Integrated GPU. Refresh devices and select
+the exact adapter. CUDA needs NVIDIA hardware/drivers; Vulkan supports compatible
+Intel/AMD/NVIDIA adapters. The model test reports text-only versus vision/audio
+readiness. CPU mode disables both language-model and encoder GPU offload.
 
-Device IDs are taken from the selected executable. Vulkan can expose compatible
-Intel/AMD integrated devices; CUDA requires compatible NVIDIA hardware/drivers.
-Hardware classification is chosen explicitly rather than guessed from a name.
-CPU mode disables GPU offload. GPU availability depends on the runtime and drivers.
+Downloads resume and are pinned to the catalog revision/release. Model and encoder
+SHA-256 hashes are checked. Runtime hashes are checked when supplied by GitHub.
+The server binds to loopback port 8787. VectorDash only stops servers it started.
+An external server must be stopped from its original application before changing
+its model/encoder.
 
-The model server binds to loopback port 8787. Start checks for an existing server;
-an existing compatible server can be used, and a conflicting server is reported.
-The app only stops server processes it owns. To replace an external model, stop
-it from its original app first. Model identity is checked before semantic indexing
-and searching to avoid mixing embeddings. Changed model fingerprints require an
-index update. Oversized inputs split into chunks with pooled vectors; launch uses
-matching context/logical/physical batch sizes of 2048 and one slot.
+**OCR:** install [Tesseract for Windows](https://tesseract-ocr.github.io/tessdoc/Installation.html).
+VectorDash detects common installations; Sources also accepts an executable path.
+English OCR is the default. For Bengali/Arabic screenshots, install the corresponding
+Tesseract language packs and select `eng+ben+ara`. Multilingual text notes do not
+need OCR language packs. Missing OCR produces a visible index warning. FFmpeg is
+bundled by the Python dependency, or you can select an existing executable.
 
-## Scheduling
+## Windows conveniences
 
-Choose Manual, At selected time, When idle, or Time + idle.
+- Ctrl+Shift+Space opens quick search from any application; the shortcut is configurable.
+- System, light and dark appearances, file previews, Explorer reveal and copy path.
+- Start with Windows, optional hidden startup, close to tray/taskbar/exit, minimize to tray/taskbar.
+- A Scheduling tab supports selected times/weekdays, idle CPU/GPU/user conditions,
+  AC power and maximum run duration. Jobs do not overlap. Missed runs run once after
+  resume; VectorDash must remain running and does not wake a sleeping PC.
+- Tray search, pause/resume, index update and Exit; reopening activates the existing instance.
 
-- Time schedules support selected weekdays and the PC's local time.
-- Idle rules independently require keyboard/mouse inactivity, low CPU usage,
-  and/or low system-wide GPU-engine usage. User inactivity can be disabled for
-  a resources-only idle schedule.
-- Configure idle duration, usage thresholds and the minimum interval between
-  idle updates. Optionally require AC power for all automatic runs.
-- Automatic runs pause between chunks when their conditions cease to hold.
-  Configure a maximum automatic-run duration; reaching it retains the old index.
-- Jobs never overlap. Missed time slots are handled once after resume; failures
-  back off for five minutes. Next run, waiting reason, telemetry, last success and
-  a bounded history are shown.
-- GPU telemetry uses Windows performance counters across all GPU engines,
-  summed conservatively and capped at 100%. Unsupported/localized counters are
-  shown as unavailable; a GPU-conditioned job waits until monitoring is available
-  or that condition is disabled. It does not silently assume an idle GPU.
+## Accuracy and current limits
 
-DigUp must remain running (the tray is sufficient). It does not wake a sleeping
-PC or run as a Windows service. Start with Windows and automatic model startup
-are separate settings. There is no filesystem watcher yet; updates happen manually
-or on the saved schedule. A signed standalone installer is still future work.
+Video samples every three seconds plus scene changes. Select a one-second interval
+for finer coverage; a very brief event between samples can be missed. Audio uses
+30-second windows overlapping by five seconds and seeks to the window start, so it
+can begin slightly before the spoken match. Silent windows are skipped. This is
+semantic audio retrieval, not a word-by-word transcript.
+
+OCR can misread tiny/blurry text; installed language packs control OCR coverage.
+PDF highlights use matching words, falling back to the retrieved passage for
+semantic queries. Protected/corrupt documents are reported as skipped. Plain text
+and DOCX extraction are bounded to 8 MiB of text; unsupported files remain
+searchable by filename. HTML/RTF retain markup. Animated images use their first frame.
+Function detection outside Python is a best-effort source parser.
+
+New installations use `%LOCALAPPDATA%\VectorDash`. Existing Windows installations
+reuse `%LOCALAPPDATA%\DigUp` so settings, downloads and indexes remain intact.
+The data folder contains `settings.json`, `index.sqlite` and `model.log`.
 
 ## Validation
 
-`windows\.venv\Scripts\python.exe -m unittest discover -s windows -v`
+The Windows suite has 50 regression checks. Native UI checks cover hotkeys,
+settings, tray/taskbar behavior, scheduling and selectable devices. Real model
+checks verified cellphone and dog-on-beach retrieval from numerically named photographs, a timed zebra
+video, spoken sleep audio, OCR invoice/error identifiers, PDF page 2, English to
+Arabic/Bengali notes, Bengali to English retrieval and a Python retry function.
+Native previews were checked for page highlights, read-only source locations,
+video/audio seeking and clean closing. Run the unit suite with:
 
-`windows\.venv\Scripts\python.exe windows\qa_desktop.py`
+```powershell
+.venv/Scripts/python.exe -m unittest discover -s . -p 'test_*.py'
+```
 
-The second command needs an interactive Windows desktop and briefly opens test
-windows. It uses isolated settings and mocks startup writes. Tests cover index
-migration/reuse, cancellation, scheduling, device/hotkey parsing, download
-checksums/resume, native hotkey delivery, tray/taskbar and keyboard behavior.
-Real CPU runtime/Q8_0 downloads, CPU embeddings and the existing CUDA server's
-index/query path were also verified locally. Actual sign-in launch and Intel/AMD
-GPU execution still require machine-specific validation.
+`qa_multimedia.py` and `qa_previews.py` are opt-in integration checks requiring
+isolated local test fixtures and a model server on port 8788. They do not read your
+personal sources. The Windows implementation is in [windows](.); retained
+Swift/macOS sources come from the upstream project.
 
-Source: https://github.com/ARahim3/DigUp
-Fork / Windows branch: https://github.com/ampersandru/DigUp/tree/windows-11
+## Credits and license
+
+Based on [DigUp](https://github.com/ARahim3/DigUp). Original code/license notices
+are retained; see [LICENSE](../LICENSE). Model/runtime/OCR dependencies carry their
+own licenses.

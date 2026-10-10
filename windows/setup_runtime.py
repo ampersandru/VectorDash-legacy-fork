@@ -10,7 +10,7 @@ import urllib.request
 import zipfile
 
 MODEL_REPO = 'ggml-org/embeddinggemma-2-GGUF'
-HEADERS = {'User-Agent': 'DigUp-Windows/0.2', 'Accept': 'application/json'}
+HEADERS = {'User-Agent': 'VectorDash-Windows/0.3', 'Accept': 'application/json'}
 
 
 def fetch_json(url):
@@ -43,12 +43,19 @@ def catalogs():
             break
     model=fetch_json(f'https://huggingface.co/api/models/{MODEL_REPO}?blobs=true')
     models=[]
+    projectors={file['rfilename']: file for file in model.get('siblings',[]) if file['rfilename'].startswith('mmproj-')}
     for file in model.get('siblings',[]):
         name=file['rfilename']
         if not name.startswith('embeddinggemma-2-') or not name.endswith('.gguf'):
             continue
         info=file.get('lfs',{})
         models.append({'label':name.removeprefix('embeddinggemma-2-').removesuffix('.gguf'), 'name':name,'size':info.get('size',file.get('size',0)), 'sha256':info.get('sha256'), 'url':f'https://huggingface.co/{MODEL_REPO}/resolve/{model["sha"]}/{name}'})
+    for item in models:
+        name='mmproj-embeddinggemma-2-'+item['label']+'.gguf'
+        file=projectors.get(name) or projectors.get('mmproj-embeddinggemma-2-Q8_0.gguf')
+        if file:
+            info=file.get('lfs',{})
+            item['projector']={'label':'Vision + audio encoder','name':file['rfilename'],'size':info.get('size',file.get('size',0)),'sha256':info.get('sha256'),'url':f'https://huggingface.co/{MODEL_REPO}/resolve/{model["sha"]}/{file["rfilename"]}'}
     if not runtimes or not models:
         raise RuntimeError('No compatible Windows runtime/model assets were found in the official catalogs.')
     return runtimes,models

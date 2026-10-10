@@ -1,172 +1,138 @@
-<p align="center"><img src="docs/logo.png" width="96" alt=""></p>
+# VectorDash for Windows 11
 
-<h1 align="center">DigUp</h1>
+Search your local files by their meaning and exact words. VectorDash is a Windows
+fork of [ARahim3/DigUp](https://github.com/ARahim3/DigUp), powered by
+[EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) and llama.cpp.
+Your selected files and queries stay on your PC. Internet access is used for
+runtime/model catalogs and downloads.
 
-<p align="center"><b>Describe it. Dig it up.</b><br>
-Search the files on your Mac by what's in them, with Google DeepMind's
-<a href="https://huggingface.co/google/embeddinggemma-2">EmbeddingGemma 2</a>.</p>
+## Start
 
-<p align="center"><a href="https://github.com/ARahim3/DigUp/releases/latest"><b>Download for Mac</b></a> · Apple Silicon,
-macOS 14 or later · Free and open source</p>
+Open [windows/Setup-VectorDash.cmd](windows/Setup-VectorDash.cmd) once, then
+[windows/Run-VectorDash.cmd](windows/Run-VectorDash.cmd). Python 3.12 or later is
+required. This checkout already has its dependencies installed.
 
-<p align="center"><img src="docs/demo.gif" width="800" alt="DigUp's search panel finding a zebra in a video, a podcast moment, a clause in a lease, a dog on the beach in English, Bengali and Arabic, and code that opens in Zed"></p>
+**Upgrading from the previous Windows port:** exit the old app from its tray,
+open VectorDash, then use **Models & hardware → Load available downloads →
+Encoder only**. Choose the quantization matching your existing EmbeddingGemma 2
+model. Stop the old model server from the app that started it, and start it again
+with the encoder selected. Enable semantic search, test the model, and use
+**Sources → Full rebuild**. Old filename/text vectors cannot identify photos.
+Existing settings and downloads are reused automatically.
 
-EmbeddingGemma 2 is the multimodal embedding model Google DeepMind released in October 2026. It puts text, images,
-audio and video into one shared space: a photo of a dog on a beach lands next to the words "a dog on the beach", and a
-recording of someone talking about sleep lands next to "where they talk about sleep". It understands more than 100
-languages, it's open (Apache 2.0), and at 740M parameters it's small enough to run comfortably on a laptop.
+## Find the content
 
-DigUp brings that to the files on your Mac. Pick the folders to search, and it reads the pictures, PDFs, documents,
-recordings and videos in them. Then describe what you're looking for, in your own words, and it finds the match,
-whatever kind of file it is. All of it happens on your Mac.
+| Search | Result |
+| --- | --- |
+| `zebra in a video` | A sampled video frame; opens the original clip at that timestamp |
+| `where they talk about sleep` | An audio window; opens playback at the matching moment |
+| `the clause about pets in the lease` | The PDF page with matching words highlighted |
+| `a dog on the beach` | A photo matched by its image content |
+| `payment declined error` | A screenshot matched by image meaning and OCR text |
+| English, Bengali or Arabic descriptions | Matching notes across the model's supported languages |
+| `code: retry a failed call with backoff` | A source function or passage with its line numbers |
+| Invoice numbers, error codes and names | Literal matches in paths, documents and screenshot OCR |
 
-## What you can find
+Search combines local semantic vectors, Unicode full-text matches and literal
+identifier matching. Each result shows its page, timestamp or source location.
+PDF/image highlights are preview overlays; original files are never annotated.
+Code opens in a read-only preview rather than running a script.
 
-- "zebra in a video" opens the clip at the moment the zebra shows up
-- "where they talk about sleep" jumps to that minute of a podcast
-- "the clause about pets in the lease" shows the PDF page, with the words marked
-- "a dog on the beach" finds the photo, and "payment declined error" the screenshot
-- a search in English can find a note written in Bengali, Arabic or any of the model's 100+ languages, and the other
-  way around
-- "code: retry a failed call with backoff" finds the function in your projects, if you turn on code search
+Images and audio use the model's actual vision/audio encoders. Audio is embedded
+directly; no cloud transcription or image captions are required. The model
+supports 100+ languages; retrieval quality varies with language and content.
 
-Exact words count too. Invoice numbers, error codes and names are matched as written, in file names, document text
-and the text inside screenshots, so a search gets both the meaning and the exact string.
+## Choose what to index
 
-## Private
+Add drives/folders in **Sources**. Select photos, audio, video and OCR individually.
+PDF text is split by page and passage; scanned pages use OCR and visual embeddings.
+Code content is excluded from ordinary file search. To enable it, opt in and add
+project folders, then use the `code:` prefix. Git ignored files, hidden folders,
+common credential files and generated dependency/build folders are excluded.
+Python functions and common brace-based language functions retain their names and
+line ranges; other languages use source passages. Notebook outputs are excluded.
 
-Nothing you index leaves your Mac. DigUp goes online only to download the model once and to check for updates once a
-day. The update check sends nothing about your files, and you can turn it off. No account, no telemetry.
+An update reuses unchanged content and removes deleted files. Changes to the
+model, encoder or content options cause reindexing. A failed embedding or a stopped
+update preserves the previous committed index. Search remains available during
+indexing; interactive requests get priority between embedding requests.
 
-## Install
+## Model setup and hardware
 
-1. Download the DMG from [Releases](https://github.com/ARahim3/DigUp/releases) and drag DigUp to Applications.
-2. Open it. While the model downloads (865 MB, once), pick the folders to search: whole folders, or only some of their
-   subfolders. DigUp shows how long the first pass will take for each.
-3. Press **⇧⌘Space** in any app and describe what you're looking for.
+In **Models & hardware**, load the official catalogs, install a CPU/CUDA/Vulkan
+Windows runtime, then choose a model quantization. **Download model + encoder**
+installs and verifies both files; **Encoder only** keeps your existing model.
+Manual paths also work. A model GGUF alone only supports text: the matching
+`mmproj-embeddinggemma-2-*.gguf` is required for vision and audio.
 
-DigUp needs an Apple Silicon Mac with macOS 14 or later (it's tested on macOS 26), and it keeps itself up to date.
+Select CPU/system RAM, Dedicated GPU or Integrated GPU. Refresh devices and select
+the exact adapter. CUDA needs NVIDIA hardware/drivers; Vulkan supports compatible
+Intel/AMD/NVIDIA adapters. The model test reports text-only versus vision/audio
+readiness. CPU mode disables both language-model and encoder GPU offload.
 
-## Using it
+Downloads resume and are pinned to the catalog revision/release. Model and encoder
+SHA-256 hashes are checked. Runtime hashes are checked when supplied by GitHub.
+The server binds to loopback port 8787. VectorDash only stops servers it started.
+An external server must be stopped from its original application before changing
+its model/encoder.
 
-| Key | What it does |
-|---|---|
-| ⇧⌘Space | Opens the search panel from any app (you can change it in Settings) |
-| ↓ ↑ | Moves through the results |
-| ↩ | Opens the result: videos and recordings at the moment, PDFs with your words in Preview's search, code in your editor at the line |
-| Space | Quick Look, at the page or moment (once you've moved to a result) |
-| ⌘↩ | Shows it in Finder |
-| ⌘C | Copies the file, to paste anywhere |
-| ⌘O | The same search in a bigger window, with a picture grid and filters |
+**OCR:** install [Tesseract for Windows](https://tesseract-ocr.github.io/tessdoc/Installation.html).
+VectorDash detects common installations; Sources also accepts an executable path.
+English OCR is the default. For Bengali/Arabic screenshots, install the corresponding
+Tesseract language packs and select `eng+ben+ara`. Multilingual text notes do not
+need OCR language packs. Missing OCR produces a visible index warning. FFmpeg is
+bundled by the Python dependency, or you can select an existing executable.
 
-DigUp lives in the menu bar, where you can see how indexing is going, pause it, or open Settings. The first time a
-video opens at its moment, macOS asks whether DigUp may control QuickTime Player; that's how it jumps there.
+## Windows conveniences
 
-## What it reads
+- Ctrl+Shift+Space opens quick search from any application; the shortcut is configurable.
+- System, light and dark appearances, file previews, Explorer reveal and copy path.
+- Start with Windows, optional hidden startup, close to tray/taskbar/exit, minimize to tray/taskbar.
+- A Scheduling tab supports selected times/weekdays, idle CPU/GPU/user conditions,
+  AC power and maximum run duration. Jobs do not overlap. Missed runs run once after
+  resume; VectorDash must remain running and does not wake a sleeping PC.
+- Tray search, pause/resume, index update and Exit; reopening activates the existing instance.
 
-Only the folders you choose:
+## Accuracy and current limits
 
-- pictures and screenshots (HEIC, JPEG, PNG, RAW, WebP and more), by what they show, and screenshots by their text too
-- PDFs, page by page, scans included. A long one gets its first 30 pages right away and the rest once everything
-  else is in (up to 5,000 pages a file)
-- documents: txt, md, rtf, doc, docx, odt, html, long ones the same way. Text that's mostly numbers, like a data
-  export, is matched by its exact text only
-- audio of any length: the model listens to 30 seconds at a time, so DigUp takes overlapping 30-second windows and a
-  match points to its moment
-- video of any length: a frame every few seconds, one per shot, plus the soundtrack the same way as audio
+Video samples every three seconds plus scene changes. Select a one-second interval
+for finer coverage; a very brief event between samples can be missed. Audio uses
+30-second windows overlapping by five seconds and seeks to the window start, so it
+can begin slightly before the spoken match. Silent windows are skipped. This is
+semantic audio retrieval, not a word-by-word transcript.
 
-Outside the folders you pick for code search, it never reads code, and inside a code project (a folder with `.git`,
-`package.json` and the like) it reads only screenshots. It never reads keys, certificates, password files, hidden
-folders like `~/.ssh`, app bundles or caches. It skips folders that look like datasets, and never downloads iCloud
-files that only live in the cloud. You can skip more folders or file types in Settings. DigUp only reads your files;
-it never changes, moves or uploads them.
+OCR can misread tiny/blurry text; installed language packs control OCR coverage.
+PDF highlights use matching words, falling back to the retrieved passage for
+semantic queries. Protected/corrupt documents are reported as skipped. Plain text
+and DOCX extraction are bounded to 8 MiB of text; unsupported files remain
+searchable by filename. HTML/RTF retain markup. Animated images use their first frame.
+Function detection outside Python is a best-effort source parser.
 
-The first pass takes a few minutes for a few hundred files and can take an hour for a big Downloads folder. That
-happens once, on battery too unless you tell it to wait for a charger, and it pauses in Low Power Mode. After that, a
-new file is searchable a second or two after it lands.
+New installations use `%LOCALAPPDATA%\VectorDash`. Existing Windows installations
+reuse `%LOCALAPPDATA%\DigUp` so settings, downloads and indexes remain intact.
+The data folder contains `settings.json`, `index.sqlite` and `model.log`.
 
-## Code
+## Validation
 
-EmbeddingGemma 2 reads code too, so DigUp can search your projects. Code search is off until you turn it on, in
-Settings → Code or during setup, for the folders you pick. Each repo shows how long reading it takes and how much room
-its index needs. Then start a search with `code:` and say what the code does, or type a name that's in it:
+The Windows suite has 50 regression checks. Native UI checks cover hotkeys,
+settings, tray/taskbar behavior, scheduling and selectable devices. Real model
+checks verified cellphone and dog-on-beach retrieval from numerically named photographs, a timed zebra
+video, spoken sleep audio, OCR invoice/error identifiers, PDF page 2, English to
+Arabic/Bengali notes, Bengali to English retrieval and a Python retry function.
+Native previews were checked for page highlights, read-only source locations,
+video/audio seeking and clean closing. Run the unit suite with:
 
-- "code: retry a failed call with backoff" finds the function, whatever it's called
-- "code: refreshAccessToken" goes to the line that defines it, not the places that call it
-- "code: plot how many examples each class has" finds the notebook cell
-
-Results open in your editor at the line: Zed, VS Code, Cursor, Xcode, Sublime Text, JetBrains IDEs and a few more
-(pick one in Settings). Code has an index of its own and never shows up in other searches. DigUp reads source files,
-notebooks (without their outputs) and a repo's own docs. It skips what git ignores, vendored and generated code, data
-files, and anything that looks like a key or a password. While you're working on code, the index catches up a minute
-after things go quiet.
-
-Reading code takes about 20 seconds for a small app, and about 20 minutes and 130 MB of index for all of llama.cpp.
-
-## How it works
-
-```
-your folders ─► readers (ImageIO, PDFKit, AVFoundation, and Vision for the text in screenshots)
-             ─► EmbeddingGemma 2 on llama.cpp (Metal), in a helper process that quits when it's done
-             ─► one SQLite file: a vector for every picture, page, passage, video frame and 30 s of sound,
-                plus a keyword index (code search keeps a second one, for code)
-your words   ─► the same model's text part (~250 MB, only while you search) ─► nearest vectors + exact words
-```
-
-DigUp runs ggml-org's 8-bit build of EmbeddingGemma 2 through [llama.cpp](https://github.com/ggml-org/llama.cpp) on
-the Mac's GPU. Every vector lives in the same 768-dimensional space, which is why one query can rank a video frame
-against a PDF page. A search embeds your words in milliseconds and compares them with everything in the index.
-Exact-word matches get a boost, because no embedding holds an invoice number exactly.
-
-The index remembers which model version made its vectors. An update that leaves the vectors unchanged keeps your
-index, and a test checks every llama.cpp update against stored reference vectors before it ships.
-
-## Build from source
-
-You'll need Xcode 26, git, and CMake (or `uv`) for llama.cpp. If `xcode-select -p` shows the Command Line Tools,
-switch to Xcode first (`sudo xcode-select -s /Applications/Xcode.app`): they lack the SwiftUI and Swift Testing
-macros the build needs.
-
-```sh
-git clone https://github.com/ARahim3/DigUp && cd DigUp
-scripts/build-llama.sh            # llama.cpp at a pinned tag, with a one-line patch (a few minutes)
-swift build -c release && swift test
-./build.sh                        # → build.noindex/DigUp.app
+```powershell
+windows/.venv/Scripts/python.exe -m unittest discover -s windows -p 'test_*.py'
 ```
 
-There's also a command-line tool, `.build/release/digup`, that indexes, searches and runs the evals from the terminal
-(`digup --help`). `scripts/make-testbed.sh` builds a folder of test files to try it on (it needs ffmpeg), and `evals/`
-holds the queries ranking changes are measured with.
+`qa_multimedia.py` and `qa_previews.py` are opt-in integration checks requiring
+isolated local test fixtures and a model server on port 8788. They do not read your
+personal sources. The Windows implementation is in [windows](windows); retained
+Swift/macOS sources come from the upstream project.
 
-## FAQ
+## Credits and license
 
-**How is this different from Spotlight?** Spotlight finds files by their names, text and metadata. DigUp also finds
-them by what they show or say, and takes you to the page or moment. The two work fine side by side.
-
-**Why is the download 865 MB?** That's the model: the text part (310 MB) and the image and audio encoders (555 MB).
-The app itself is about 20 MB.
-
-**Will it slow my Mac down?** Only the first pass is heavy. After that it reads new files only. The model runs in a
-separate process that quits when it's done, and the search side only loads while you're searching.
-
-**Which languages?** The model knows more than 100, and DigUp searches in all of them, across languages too. The evals
-cover only English, Bengali and Arabic because those are the languages of the files DigUp was tested on, and Google
-notes that the model isn't equally strong in every language. Two limits apply to exact words, not to meaning: inside
-screenshots they're read by Apple's text recognition, which knows about 25 languages, and languages written without
-spaces, like Chinese, Japanese and Thai, aren't split into words.
-
-**How do I remove it?** Quit it, then delete DigUp.app and `~/Library/Application Support/DigUp`, which holds the
-model and the indexes. Its settings are in `~/Library/Preferences/com.abdurrahim.DigUp.plist`.
-
-## Thanks
-
-DigUp is built on [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) by Google DeepMind (Apache 2.0),
-[llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT) and [Sparkle](https://sparkle-project.org) (MIT). Their
-license notices ship inside the app, in `DigUp.app/Contents/Resources/Acknowledgements.txt`.
-
-DigUp isn't affiliated with Google or Apple. Gemma is a trademark of Google LLC; Mac and Spotlight are trademarks of
-Apple Inc.
-
-## License
-
-MIT
+Based on [DigUp](https://github.com/ARahim3/DigUp). Original code/license notices
+are retained; see [LICENSE](LICENSE). Model/runtime/OCR dependencies carry their
+own licenses.
