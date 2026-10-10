@@ -5,7 +5,7 @@ from PIL import Image,ImageOps
 import pymupdf
 from PySide6.QtCore import Qt,QUrl,QTimer
 from PySide6.QtGui import QImage,QPixmap,QPainter,QColor,QTextCursor,QTextCharFormat
-from PySide6.QtWidgets import QApplication,QDialog,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QScrollArea,QSpinBox,QSlider,QPlainTextEdit,QTextEdit
+from PySide6.QtWidgets import QApplication,QDialog,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,QScrollArea,QSpinBox,QSlider,QPlainTextEdit,QTextEdit,QSizePolicy
 from PySide6.QtMultimedia import QMediaPlayer,QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -18,9 +18,28 @@ def matches(text,query):
     words=query_words(query)
     return any(word in text.casefold() for word in words)
 
+class FitPicture(QLabel):
+    def __init__(self):
+        super().__init__()
+        self.original=QPixmap()
+        self.setMinimumSize(1,1)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Ignored)
+    def setPixmap(self,pixmap):
+        self.original=pixmap
+        self.fit()
+    def fit(self):
+        if not self.original.isNull():
+            super().setPixmap(self.original.scaled(self.size(),Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+    def resizeEvent(self,event):
+        self.fit()
+        super().resizeEvent(event)
+
 class Preview(QDialog):
-    def __init__(self,result,parent=None):
+    def __init__(self,result,parent=None,embedded=False):
         super().__init__(parent)
+        self.embedded=embedded
+        if embedded:
+            self.setWindowFlags(Qt.WindowType.Widget)
         self.result=result
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle(Path(result.path).name+' — '+result.location()+' — VectorDash')
@@ -42,12 +61,16 @@ class Preview(QDialog):
         elif result.kind=='code':
             self.code()
         else:
-            self.image()
+            from content import IMAGE
+            if Path(result.path).suffix.lower() in IMAGE:
+                self.image()
+            else:
+                self.text()
 
     def canvas(self):
         self.scroll=QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.picture=QLabel()
+        self.picture=FitPicture() if self.embedded else QLabel()
         self.picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scroll.setWidget(self.picture)
         self.layout.addWidget(self.scroll,1)
@@ -84,7 +107,7 @@ class Preview(QDialog):
             if not rectangles and self.result.boxes:
                 rectangles=[pymupdf.Rect(x,y,x+w,y+h) for word,x,y,w,h in self.result.boxes if word.casefold() in self.result.snippet.casefold()]
         self.highlight_count=len(rectangles)
-        scale=1.4
+        scale=min(1.4,380/max(page.rect.width,1)) if self.embedded else 1.4
         pixmap=page.get_pixmap(matrix=pymupdf.Matrix(scale,scale),alpha=False)
         image=QImage(pixmap.samples,pixmap.width,pixmap.height,pixmap.stride,QImage.Format.Format_RGB888).copy()
         painter=QPainter(image)
@@ -94,7 +117,8 @@ class Preview(QDialog):
             painter.drawRect(int(rect.x0*scale),int(rect.y0*scale),max(1,int(rect.width*scale)),max(1,int(rect.height*scale)))
         painter.end()
         self.picture.setPixmap(QPixmap.fromImage(image))
-        self.picture.setMinimumSize(image.size())
+        if not self.embedded:
+            self.picture.setMinimumSize(image.size())
         self.caption.setText(f'Page {self.page.value()} · {len(rectangles)} highlights · {self.result.path}')
 
     def image(self):
@@ -102,7 +126,7 @@ class Preview(QDialog):
         with Image.open(self.result.path) as source:
             image=ImageOps.exif_transpose(source).convert('RGB')
         original=image.size
-        image.thumbnail((1600,1200))
+        image.thumbnail((380,480) if self.embedded else (1600,1200))
         pixels=image.tobytes()
         display=QImage(pixels,image.width,image.height,image.width*3,QImage.Format.Format_RGB888).copy()
         painter=QPainter(display)
@@ -114,7 +138,8 @@ class Preview(QDialog):
                 painter.drawRect(int(x*sx),int(y*sy),int(w*sx),int(h*sy))
         painter.end()
         self.picture.setPixmap(QPixmap.fromImage(display))
-        self.picture.setMinimumSize(display.size())
+        if not self.embedded:
+            self.picture.setMinimumSize(display.size())
 
     def media(self):
         self.player=QMediaPlayer(self)
@@ -138,7 +163,8 @@ class Preview(QDialog):
         self.pending_seek=max(0,round(self.result.seconds*1000))
         self.player.mediaStatusChanged.connect(self.loaded)
         self.player.setSource(QUrl.fromLocalFile(self.result.path))
-        self.player.play()
+        if not self.embedded:
+            self.player.play()
 
     def loaded(self,status):
         if status in (QMediaPlayer.MediaStatus.LoadedMedia,QMediaPlayer.MediaStatus.BufferedMedia) and self.pending_seek is not None:
@@ -176,6 +202,24 @@ class Preview(QDialog):
         viewer.centerCursor()
         self.code_viewer=viewer
 
+    def text(self):
+        from digup_windows import read_text
+        viewer=QPlainTextEdit()
+        viewer.setReadOnly(True)
+        text=read_text(Path(self.result.path)) or self.result.snippet or 'No text preview available for this file.'
+        viewer.setPlainText(text[:100000])
+        selections=[]
+        for word in query_words(self.result.query):
+            cursor=viewer.document().find(word)
+            while not cursor.isNull() and len(selections)<200:
+                selection=QTextEdit.ExtraSelection()
+                selection.cursor=cursor
+                selection.format.setBackground(QColor(255,215,40,100))
+                selections.append(selection)
+                cursor=viewer.document().find(word,cursor)
+        viewer.setExtraSelections(selections)
+        self.layout.addWidget(viewer,1)
+
     def release(self,*args):
         if self.released:
             return
@@ -193,3 +237,45 @@ class Preview(QDialog):
     def closeEvent(self,event):
         self.release()
         super().closeEvent(event)
+
+
+class SelectionPreview(QWidget):
+    """Shared right-hand preview; replaces and releases the previous selection."""
+    def __init__(self,parent=None):
+        super().__init__(parent)
+        self.setMinimumWidth(260)
+        self.layout=QVBoxLayout(self)
+        self.layout.setContentsMargins(0,0,0,0)
+        self.placeholder=QLabel('Select a result to preview it.')
+        self.placeholder.setWordWrap(True)
+        self.layout.addWidget(self.placeholder)
+        self.current=None
+    def show_result(self,result):
+        self.clear()
+        if not result:
+            return
+        from engine import SearchResult
+        if not isinstance(result,SearchResult):
+            result=SearchResult(0,str(result),'')
+        try:
+            self.current=Preview(result,self,embedded=True)
+            self.layout.addWidget(self.current,1)
+            self.current.show()
+            self.placeholder.hide()
+        except Exception as error:
+            for child in self.findChildren(Preview,options=Qt.FindChildOption.FindDirectChildrenOnly):
+                child.release()
+                child.close()
+            if self.current:
+                self.current.release()
+                self.current.deleteLater()
+                self.current=None
+            self.placeholder.setText('Preview unavailable: '+str(error))
+    def clear(self):
+        if self.current:
+            self.current.release()
+            self.layout.removeWidget(self.current)
+            self.current.close()
+            self.current=None
+        self.placeholder.setText('Select a result to preview it.')
+        self.placeholder.show()

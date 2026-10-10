@@ -19,11 +19,11 @@ import psutil
 from PySide6.QtCore import Qt, QObject, Signal, QTimer, QTime, QAbstractNativeEventFilter, QFileInfo, QEvent
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut, QCursor, QPainter, QColor, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QStackedWidget, QComboBox, QCheckBox, QSpinBox, QTimeEdit, QFileDialog, QMessageBox, QFrame, QSystemTrayIcon, QMenu, QProgressBar, QScrollArea, QFileIconProvider, QAbstractItemView, QPlainTextEdit)
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QStackedWidget, QComboBox, QCheckBox, QSpinBox, QTimeEdit, QFileDialog, QMessageBox, QFrame, QSystemTrayIcon, QMenu, QProgressBar, QScrollArea, QFileIconProvider, QAbstractItemView, QPlainTextEdit, QSplitter)
 from engine import Engine, Settings, SearchResult, verify_server_model
-from previews import Preview
+from previews import Preview, SelectionPreview
 from digup_windows import command, embed, embedding_request, server_url
-from windows_integration import GlobalHotkey, HOTKEY_ID, set_startup, parse_devices, idle_seconds, gpu_utilization
+from windows_integration import GlobalHotkey, HOTKEY_ID, set_startup, reveal_in_explorer, parse_devices, idle_seconds, gpu_utilization
 from scheduling import schedule_due, idle_allowed, next_run
 from setup_runtime import catalogs, install_runtime, install_model
 from setup_tools import install_ocr, install_ffmpeg
@@ -40,6 +40,7 @@ class Events(QObject):
     metrics = Signal(object)
     model = Signal(str)
     log = Signal(str, str)
+    tools_ready = Signal(object)
 
 def app_icon(active=False, phase=0):
     pixmap=QPixmap(64,64)
@@ -188,14 +189,20 @@ class QuickSearch(QWidget):
         self.setWindowTitle('VectorDash Quick Search')
         self.setWindowIcon(owner.windowIcon())
         self.setObjectName('quickSearch')
-        self.resize(760,470)
+        self.resize(1060,570)
         layout=QVBoxLayout(self)
         layout.setContentsMargins(20,20,20,16)
         layout.addWidget(row(label('VectorDash','cardTitle'),button('Open full app',self.full)))
         self.results=Results(owner)
         self.input=SearchEdit(self.results)
         layout.addWidget(self.input)
-        layout.addWidget(self.results,1)
+        self.preview=SelectionPreview(self)
+        split=QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(self.results)
+        split.addWidget(self.preview)
+        split.setSizes([600,420])
+        layout.addWidget(split,1)
+        self.results.currentItemChanged.connect(lambda current,previous:self.preview.show_result(self.results.selected_result()))
         self.hint=label('↑ ↓ select     Enter open     Esc dismiss','muted')
         layout.addWidget(self.hint)
         self.timer=QTimer(self)
@@ -205,6 +212,10 @@ class QuickSearch(QWidget):
         self.input.textChanged.connect(lambda:self.changed())
         self.input.returnPressed.connect(lambda:owner.open_file(self.results.selected_result()) if self.results.count() else owner.request_search(self.input.text()))
         QShortcut(QKeySequence('Escape'),self,activated=self.hide)
+    def hideEvent(self,event):
+        self.preview.clear()
+        super().hideEvent(event)
+
     def changed(self):
         self.results.clear()
         self.owner.search_sequence+=1
@@ -217,6 +228,7 @@ class QuickSearch(QWidget):
     def summon(self):
         screen=QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         area=screen.availableGeometry()
+        self.resize(min(1060,area.width()-40),min(570,area.height()-80))
         self.move(area.center().x()-self.width()//2,area.top()+max(40,int(area.height()*.22)))
         self.show()
         self.raise_()
@@ -242,6 +254,10 @@ class Desktop(QMainWindow):
         self.store=settings
         process_lifecycle.reopen()
         self.settings=settings.values
+        self.settings['semantic']=True
+        self.model_loaded=False
+        self.loaded_modalities={}
+        self.tool_ready={}
         self.engine=Engine(settings.home)
         self.events=Events()
         self.indexing=False
@@ -275,6 +291,7 @@ class Desktop(QMainWindow):
         self.setWindowIcon(app_icon())
         self.resize(1120,820)
         self.setMinimumSize(850,620)
+        self.events.tools_ready.connect(self.tools_status_finished)
         self.events.log.connect(self.append_log)
         self.logger=logging.getLogger('vectordash')
         self.logger.setLevel(logging.DEBUG)
@@ -334,7 +351,7 @@ class Desktop(QMainWindow):
         self.icon_timer.timeout.connect(self.animate_index_icon)
         self.icon_timer.start()
         QApplication.instance().aboutToQuit.connect(self.cleanup)
-        QTimer.singleShot(1000,self.probe_model)
+        QTimer.singleShot(1000,self.refresh_component_status)
         QApplication.styleHints().colorSchemeChanged.connect(lambda:self.apply_theme() if self.settings['theme']=='System' else None)
         QTimer.singleShot(500,self.tick)
         if self.settings['auto_model']:
@@ -439,7 +456,13 @@ class Desktop(QMainWindow):
         layout.addWidget(self.query)
         self.search_hint=label('Type to search your indexed files.','muted')
         layout.addWidget(self.search_hint)
-        layout.addWidget(self.results,1)
+        self.result_preview=SelectionPreview(self)
+        split=QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(self.results)
+        split.addWidget(self.result_preview)
+        split.setSizes([560,400])
+        layout.addWidget(split,1)
+        self.results.currentItemChanged.connect(lambda current,previous:self.result_preview.show_result(self.results.selected_result()))
         layout.addWidget(row(button('Open',lambda:self.open_file(self.results.selected_result()),True),button('Show in Explorer',self.reveal),button('Copy path',self.copy_path)))
         self.stack.addWidget(page)
         self.search_timer=QTimer(self)
@@ -499,14 +522,26 @@ class Desktop(QMainWindow):
             self.code_sources.addItem(path)
 
     def models_page(self):
-        layout=self.page('Models & hardware','Set up local semantic search, or keep using filename and text search.')
+        layout=self.page('Models & hardware','Choose the features you want, then start your local or remote model.')
         frame,inside=card('One-click setup','Downloads and installs the selected runtime, model, encoder, OCR language packs and media decoder. Choose hardware and quantization below first.')
         self.setup_progress=QProgressBar()
         self.setup_progress.setValue(0)
         inside.addWidget(self.setup_progress)
-        self.setup_checklist=label('Checking installed components…','muted')
-        inside.addWidget(self.setup_checklist)
-        inside.addWidget(row(button('Download, install and start',self.setup_all,True),button('Refresh status',self.probe_model),button('Cancel setup',self.download_cancel.set)))
+        self.setup_choices={}
+        self.component_status={}
+        components=[('server','Local model runtime',True),('model','Text search model',True),('projector','Photos, audio and video encoder',True),('ocr','Exact text in screenshots and scanned PDFs',self.settings.get('ocr_enabled',True)),('ffmpeg','Audio and video decoder',True)]
+        saved=self.settings.get('setup_components',{})
+        for key,title,default in components:
+            choice=QCheckBox(title)
+            choice.setChecked(saved.get(key,default))
+            status=label('Checking…')
+            status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.setup_choices[key]=choice
+            self.component_status[key]=status
+            inside.addWidget(row(choice,status))
+            choice.toggled.connect(self.update_tool_state)
+        self.setup_button=button('Download, install and start',self.setup_all,True)
+        inside.addWidget(row(self.setup_button,button('Refresh status',self.refresh_component_status),button('Cancel setup',self.download_cancel.set)))
         layout.addWidget(frame)
         frame,inside=card('Server connection','Remote mode sends indexed content and search queries to your chosen server.')
         self.field(inside,'server_mode','Embedding server','combo',['Local','Remote'])
@@ -517,7 +552,6 @@ class Desktop(QMainWindow):
         inside.addWidget(row(button('Save connection',self.save),button('Connect / check status',self.start_model)))
         layout.addWidget(frame)
         frame,inside=card('Local inference','Keep your existing runtime and model, or download them below.')
-        self.field(inside,'semantic','Use semantic search','check')
         self.field(inside,'mode','Run on','combo',['CPU / system RAM','Dedicated GPU','Integrated GPU'])
         self.devices=ScrollSafeComboBox()
         self.devices.addItem(self.settings['device'] or 'Select an adapter',self.settings['device'])
@@ -547,6 +581,7 @@ class Desktop(QMainWindow):
         inside.addWidget(self.download_summary)
         self.runtime_choice.currentIndexChanged.connect(self.catalog_summary)
         self.quant_choice.currentIndexChanged.connect(self.catalog_summary)
+        self.quant_choice.currentIndexChanged.connect(self.update_tool_state)
         self.download_bar=QProgressBar()
         self.download_bar.setValue(0)
         inside.addWidget(self.download_bar)
@@ -660,6 +695,8 @@ class Desktop(QMainWindow):
                 values[key]=widget.time().toString('HH:mm')
             else:
                 values[key]=widget.text().strip()
+        values['semantic']=True
+        values['setup_components']={key:choice.isChecked() for key,choice in self.setup_choices.items()}
         values['roots']=[self.sources.item(i).text() for i in range(self.sources.count())]
         values['code_roots']=[self.code_sources.item(i).text() for i in range(self.code_sources.count())]
         values['device']=self.devices.currentData() or ''
@@ -964,7 +1001,10 @@ class Desktop(QMainWindow):
 
     def reveal(self):
         if path:=self.results.selected_path():
-            process_lifecycle.popen(['explorer.exe',f'/select,{path}'])
+            try:
+                reveal_in_explorer(path)
+            except OSError as error:
+                self.error(str(error))
 
     def copy_path(self):
         if path:=self.results.selected_path():
@@ -1010,8 +1050,10 @@ class Desktop(QMainWindow):
             self.probe_model()
             return
         if self.model_process and self.model_process.poll() is None:
-            self.set_status('The model is already running')
-            return
+            if self.model_process.args==command(self.settings):
+                self.set_status('The model is already running')
+                return
+            self.stop_model()
         try:
             if not Path(self.settings['server']).is_file() or not Path(self.settings['model']).is_file():
                 raise ValueError('Choose or download a runtime and model first.')
@@ -1053,6 +1095,9 @@ class Desktop(QMainWindow):
 
     def model_status(self,message):
         previous=self.model_state.text()
+        self.model_loaded=message.startswith('loaded') or 'test passed' in message.lower() or 'Model: loaded' in message
+        if not self.model_loaded:
+            self.loaded_modalities={}
         self.model_state.setText(message)
         if hasattr(self,'settings_model_state'):
             self.settings_model_state.setText(message)
@@ -1105,6 +1150,7 @@ class Desktop(QMainWindow):
                     vector=embed('task: search result | query: A document about Windows desktop search',request=lambda text:embedding_request(text,snapshot))
                 with urllib.request.urlopen(urllib.request.Request(server_url(snapshot)+'/props',headers={'Authorization':'Bearer '+snapshot['remote_key']} if snapshot.get('remote_key') else {}),timeout=5) as response:
                     modalities=json.load(response).get('modalities',{})
+                self.loaded_modalities=modalities
                 ready=modalities.get('vision') and modalities.get('audio')
                 if snapshot.get('server_mode')!='Remote' and snapshot.get('projector') and not ready:
                     raise ValueError('The running server has no vision/audio encoder. Stop it and start the model with the selected encoder.')
@@ -1152,16 +1198,70 @@ class Desktop(QMainWindow):
             total=self.runtimes[r]['size']+self.models[q]['size']+self.models[q].get('projector',{}).get('size',0)
             self.download_summary.setText(f'Total download: {total/1024**2:.0f} MB. Model SHA-256 verified. Choose the runtime for your hardware; existing installations are retained.')
 
-    def update_tool_state(self):
-        if hasattr(self,'setup_checklist'):
-            state=getattr(self,'model_state',None)
-            self.setup_checklist.setText('\n'.join([('✓' if Path(self.settings.get(key,'')).is_file() else '○')+' '+title for key,title in [('server','llama-server installed'),('model','EmbeddingGemma 2 installed'),('projector','Image + audio encoder installed')]])+'\n'+('✓ OCR: available' if ocr_program(self.settings) else '○ OCR: not installed')+'\n'+('✓ Media decoder: available' if Path(ffmpeg(self.settings)).is_file() else '○ Media decoder: missing')+'\n'+('Model: '+state.text() if state else 'Model: checking'))
+    def component_installed(self,key):
         try:
-            engine=ocr_program(self.settings)
-            decoder=ffmpeg(self.settings)
-            self.tool_state.setText(('OCR detected' if engine else 'OCR not installed; image meaning search still works')+' · '+('Media decoder available' if Path(decoder).is_file() else 'Media decoder needs setup'))
-        except Exception as error:
-            self.tool_state.setText(str(error))
+            if key=='ocr':
+                program=ocr_program(self.settings)
+                if not program:
+                    return False
+                data=Path(self.settings['ocr_data']) if self.settings.get('ocr_data') else Path(program).parent/'tessdata'
+                return all((data/(code+'.traineddata')).is_file() for code in self.settings.get('ocr_languages','eng').split('+'))
+            if key=='ffmpeg':
+                return Path(ffmpeg(self.settings)).is_file()
+            path=Path(self.settings.get(key,''))
+            installed=path.is_file()
+            if key in ('model','projector') and installed:
+                quant=self.quant_choice.currentData() if hasattr(self,'quant_choice') else None
+                if quant and any(token in path.name.upper() for token in ('Q8_0','BF16')):
+                    installed=quant in path.name.upper()
+            return installed
+        except Exception:
+            return False
+
+    def update_tool_state(self,*args):
+        if not hasattr(self,'setup_choices'):
+            return
+        for key,status in self.component_status.items():
+            installed=self.component_installed(key)
+            if self.settings.get('server_mode')=='Remote' and key in ('server','model','projector'):
+                installed=self.model_loaded
+            loaded=installed and (self.model_loaded if key in ('server','model') else bool(self.loaded_modalities.get('vision') or self.loaded_modalities.get('audio')) if key=='projector' else self.tool_ready.get(key,False))
+            text,color=('Loaded' if key in ('server','model','projector') else 'Ready','#16834a') if loaded else ('Installed · not loaded','#aa7900') if installed else ('Not installed','#c73545')
+            status.setText(text)
+            status.setStyleSheet('color: '+color+'; font-weight: 600;')
+        selected=[key for key,choice in self.setup_choices.items() if choice.isChecked()]
+        ready=all(self.component_installed(key) for key in set(selected)|{'server','model'})
+        self.setup_button.setText('Start' if ready else 'Download, install and start')
+        if hasattr(self,'tool_state'):
+            self.tool_state.setText('OCR: '+self.component_status['ocr'].text()+' · Media decoder: '+self.component_status['ffmpeg'].text())
+
+    def refresh_component_status(self):
+        if not self.save(quiet=True):
+            return
+        self.probe_model()
+        snapshot=dict(self.settings)
+        def work():
+            ready={}
+            for key,args in [('ocr',[ocr_program(snapshot),'--version']),('ffmpeg',[ffmpeg(snapshot),'-version'])]:
+                try:
+                    if args[0]:
+                        result=process_lifecycle.run(args,capture_output=True,timeout=10,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                        ready[key]=result.returncode==0
+                        if key=='ocr' and ready[key]:
+                            languages=[args[0],'--list-langs']
+                            if snapshot.get('ocr_data'):
+                                languages+=['--tessdata-dir',snapshot['ocr_data']]
+                            packs=process_lifecycle.run(languages,capture_output=True,text=True,timeout=10,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+                            ready[key]=packs.returncode==0 and all(code in packs.stdout.splitlines() for code in snapshot.get('ocr_languages','eng').split('+'))
+                except Exception:
+                    ready[key]=False
+            if not self.shutting_down:
+                self.events.tools_ready.emit(ready)
+        self.launch(work)
+
+    def tools_status_finished(self,ready):
+        self.tool_ready=ready
+        self.update_tool_state()
 
     def install_tool(self,key):
         if self.installing or self.indexing:
@@ -1252,10 +1352,10 @@ class Desktop(QMainWindow):
         if key=='tools':
             self.set_status('Tools installed, verified and configured. Update the index to apply OCR changes.')
         if key=='setup':
-            self.widgets['semantic'].setChecked(True)
             self.settings['semantic']=True
             self.store.save()
             self.start_model()
+            self.refresh_component_status()
         if key=='server':
             self.refresh_devices()
 
@@ -1263,12 +1363,25 @@ class Desktop(QMainWindow):
         if self.installing or self.indexing:
             self.set_status('Wait for the current setup or indexing task to finish')
             return
+        selection={key:choice.isChecked() for key,choice in self.setup_choices.items()}
+        self.widgets['ocr_enabled'].setChecked(selection['ocr'])
+        self.widgets['index_images'].setChecked(selection['projector'])
+        for key in ('index_audio','index_video'):
+            self.widgets[key].setChecked(selection['projector'] and selection['ffmpeg'])
         if not self.save(quiet=True):
             return
         if self.settings.get('server_mode')=='Remote':
             self.probe_model()
             self.set_status('Remote models are installed on their host. Use local setup for downloads on this PC.')
             return
+        if all(self.component_installed(key) for key in {key for key,value in selection.items() if value}|{'server','model'}):
+            self.start_model()
+            self.refresh_component_status()
+            return
+        for key in ('server','model'):
+            if not selection[key] and not self.component_installed(key):
+                self.set_status('Select the runtime and text model, or choose existing files before starting.')
+                return
         if self.model_process:
             self.stop_model()
         snapshot=dict(self.settings)
@@ -1281,14 +1394,21 @@ class Desktop(QMainWindow):
         def work():
             paths={}
             try:
-                runtimes,models=catalogs()
+                need_model=any(selection[key] and not self.component_installed(key) for key in ('server','model','projector'))
+                runtimes,models=catalogs() if need_model else ([],[])
                 preferred='cpu' if snapshot['mode']=='CPU / system RAM' else ('cuda-' if str(snapshot['device']).upper().startswith('CUDA') else 'vulkan')
-                runtime=selected if isinstance(selected,dict) else next(item for item in runtimes if item['backend'].startswith(preferred))
-                model=next(item for item in models if item['label']==quant)
-                for key,item,installer in [('server',runtime,install_runtime),('model',model,install_model),('projector',model['projector'],install_model)]:
+                runtime=(selected if isinstance(selected,dict) else next(item for item in runtimes if item['backend'].startswith(preferred))) if need_model else None
+                model=next(item for item in models if item['label']==quant) if need_model else {}
+                for key,item,installer in [('server',runtime,install_runtime),('model',model,install_model),('projector',model.get('projector'),install_model)]:
+                    if not selection[key]:
+                        if snapshot.get(key):
+                            paths[key]=snapshot[key]
+                        continue
                     if self.download_cancel.is_set():
                         raise InterruptedError('Setup cancelled')
                     if not Path(snapshot.get(key,'')).is_file() or (key!='server' and quant not in Path(snapshot.get(key,'')).name):
+                        if not item:
+                            raise ValueError('No downloadable component is available for '+key)
                         paths[key]=installer(item,self.store.home,self.download_cancel,self.events.progress.emit)
                     else:
                         paths[key]=snapshot[key]
@@ -1303,8 +1423,9 @@ class Desktop(QMainWindow):
                             raise ValueError('Select your integrated GPU from Refresh devices before starting the model.')
                         adapters=integrated
                     paths['device']=adapters[0][0]
-                paths.update(install_ffmpeg(self.store.home,self.download_cancel,self.events.progress.emit))
-                if snapshot.get('ocr_enabled'):
+                if selection['ffmpeg']:
+                    paths.update(install_ffmpeg(self.store.home,self.download_cancel,self.events.progress.emit))
+                if selection['ocr']:
                     paths.update(install_ocr(snapshot,self.store.home,self.download_cancel,self.events.progress.emit))
                 self.events.installed.emit('setup',json.dumps(paths),'')
             except Exception as error:
@@ -1326,6 +1447,7 @@ class Desktop(QMainWindow):
                 with urllib.request.urlopen(request,timeout=3) as response:
                     props=json.load(response)
                 modes=props.get('modalities',{})
+                self.loaded_modalities=modes
                 message='loaded · text: ready · images: '+('ready' if modes.get('vision') else 'unavailable')+' · audio: '+('ready' if modes.get('audio') else 'unavailable')
             except Exception as error:
                 self.logger.debug('Model status check: %s',error)

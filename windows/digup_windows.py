@@ -37,7 +37,7 @@ def cosine(a, b):
 def command(settings):
     args = [settings['server'], '-m', settings['model'], '--embedding', '--host', '127.0.0.1', '--port', '8787', '-c', '2048', '--batch-size', '2048', '--ubatch-size', '2048', '--parallel', '1']
     args += ['--pooling', 'mean']
-    if settings.get('projector'):
+    if settings.get('projector') and any(settings.get(key,True) for key in ('index_images','index_audio','index_video')):
         args += ['--mmproj', settings['projector'], '--image-min-tokens', '70', '--image-max-tokens', '280']
         if settings['mode'] == 'CPU / system RAM':
             args += ['--no-mmproj-offload']

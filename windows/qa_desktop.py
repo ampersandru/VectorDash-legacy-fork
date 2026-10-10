@@ -105,7 +105,6 @@ with tempfile.TemporaryDirectory(prefix='digup-ui-',dir=Path(__file__).parents[1
     QTest.qWait(100)
     assert window.indexing, 'Resource-conditioned indexing did not wait'
     window.widgets['schedule_mode'].setCurrentText('Manual')
-    window.widgets['semantic'].setChecked(False)
     assert window.save(quiet=True)
     assert wait_for(lambda:not window.indexing), 'Disabling schedule did not stop the waiting job'
     print('Automatic scheduling, result commit, CPU waiting and schedule-disable cancellation passed')

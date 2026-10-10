@@ -16,7 +16,7 @@ required. This checkout already has its dependencies installed.
 open VectorDash, then use **Models & hardware → Load available downloads →
 Encoder only**. Choose the quantization matching your existing EmbeddingGemma 2
 model. Stop the old model server from the app that started it, and start it again
-with the encoder selected. Enable semantic search, test the model, and use
+with the encoder selected. Semantic search is always enabled. Test the model, and use
 **Sources → Full rebuild**. Old filename/text vectors cannot identify photos.
 Existing settings and downloads are reused automatically.
 
@@ -165,7 +165,10 @@ The first card in **Models & hardware** is **One-click setup**. Choose hardware
 and quantization below it, then click **Download, install and start**. It installs
 missing llama-server, the selected EmbeddingGemma 2 GGUF and matching encoder,
 managed FFmpeg, and (when enabled) Tesseract plus your chosen OCR languages.
-Installed components are reused. The checklist and Settings report model/feature
+Use the feature checkboxes to choose which components to install. Installed
+components are reused, and the button becomes **Start** when the selected
+components are present. Right-aligned statuses are green for loaded/ready, yellow
+for installed but not loaded/verified, and red for missing. The checklist and Settings report model/feature
 readiness, and model status is checked periodically. Downloads can be cancelled.
 
 Choose **Remote** in Server connection to use an existing EmbeddingGemma 2
@@ -196,3 +199,19 @@ The Windows application is newly written Python/Qt code. It does not compile or
 import the original macOS Swift application; the fork retains the original source,
 resources and MIT attribution. A standalone Windows repository is a reasonable
 future home for VectorDash if the macOS implementation will not be maintained here.
+
+
+## Result previews and picture queries
+
+Selecting a result displays its image, PDF page with highlights, text, source
+passage, or audio/video moment in the right-hand pane. The hotkey search window
+has the same preview. Media previews wait for Play instead of starting sound as
+selection changes, and switching results releases the previous media player.
+**Show in Explorer** selects the actual file using the Windows Shell API.
+
+Semantic search is always enabled in the desktop app. If an earlier index was
+built with semantic search disabled, start the model and run **Sources → Full
+rebuild** once to add the missing image/audio/text embeddings. Picture queries
+such as “images of dogs” match the subject; generic words describing file types
+do not add lexical score when another subject is present. Exact IDs and error
+codes retain their stronger literal-match score.

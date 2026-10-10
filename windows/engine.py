@@ -321,13 +321,18 @@ class Engine:
             self.query_waiting.set()
             try:
                 with self.inference:
-                    prompt=('task: code retrieval | query: ' if code else 'task: search result | query: ')+query
+                    subject=re.sub(r'^(?:images?|photos?|pictures?)\s+(?:of\s+)?','',query,flags=re.I).strip() or query
+                    prompt=('task: code retrieval | query: ' if code else 'task: search result | query: ')+subject
                     vector=embed(prompt,request=lambda text:embedding_request(text,settings)) if settings.get('server_mode')=='Remote' else embed(prompt)
             finally:
                 self.query_waiting.clear()
         tokens=re.findall(r'[\w]+(?:[-./:][\w]+)*',query.casefold())
         stop={'a','an','the','in','on','at','of','to','and','or','where','they','about','find','shows','show','me','with','is','it'}
         tokens=[token for token in tokens if token not in stop] or tokens
+        format_words={'image','images','photo','photos','picture','pictures','video','videos','clip','clips','audio','podcast','podcasts','document','documents','file','files'}
+        subjects=[token for token in tokens if token not in format_words]
+        if subjects:
+            tokens=subjects
         if not tokens:
             return []
         results=[]
@@ -342,7 +347,7 @@ class Engine:
                 lexical=matches/len(tokens)
                 semantic=cosine(vector,json.loads(stored)) if vector else 0
                 identifier=bool(re.search(r'\d|[_:/-]',query))
-                score=((2 if identifier else .65) if literal else 0)+(.35*lexical if vector else lexical)+(.05 if rowid in exact else 0)+semantic
+                score=((2 if identifier else .65) if literal else 0)+((.35 if identifier else .15)*lexical if vector else lexical)+(.05 if rowid in exact else 0)+semantic
                 lowered=query.casefold()
                 if vector:
                     if ('video' in lowered or 'clip' in lowered) and kind in ('video','video_audio'):

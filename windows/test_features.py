@@ -103,6 +103,23 @@ class FeatureTests(unittest.TestCase):
         finally:
             server.shutdown();server.server_close();worker.join()
 
+    def test_picture_query_ranks_subject_above_generic_ocr_words(self):
+        settings=dict(DEFAULTS,semantic=True,model=str(self.home/'model.gguf'))
+        Path(settings['model']).write_bytes(b'model')
+        engine=Engine(self.home)
+        with engine.connect() as db:
+            db.execute("INSERT OR REPLACE INTO metadata VALUES('signature',?)",(model_signature(settings),))
+            for name,text,vector in [('compatibility.png','Image upload: pasted images stay inline',[.2,.98]),('dogs.jpg','',[1,0]),('error.png','Payment declined E_PAYMENT_402',[.3,.95])]:
+                db.execute('INSERT INTO segments VALUES(?,?,?,?,?,?)',(str(self.home/name),'files','image',text,json.dumps(vector),'{}'))
+            db.execute('INSERT INTO words(rowid,path,text) SELECT rowid,path,text FROM segments')
+        with patch('engine.verify_server_model'),patch('engine.embed',return_value=[1,0]) as embed:
+            images=engine.search('images of dogs',settings)
+            self.assertEqual(Path(images[0].path).name,'dogs.jpg')
+            self.assertFalse(any(Path(result.path).name=='compatibility.png' for result in images))
+            self.assertIn('query: dogs',embed.call_args.args[0])
+            exact=engine.search('E_PAYMENT_402',settings)
+            self.assertEqual(Path(exact[0].path).name,'error.png')
+
     def test_shutdown_blocks_new_helpers(self):
         process_lifecycle.close()
         with patch('process_lifecycle.subprocess.Popen') as spawn:

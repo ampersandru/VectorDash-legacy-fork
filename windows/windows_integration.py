@@ -110,3 +110,35 @@ def gpu_utilization():
         return min(100.0,max(0.0,float(result.stdout.strip()))) if result.returncode == 0 else None
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
+
+
+def reveal_in_explorer(path):
+    """Select the exact item using Windows Shell PIDLs, with no command parsing."""
+    if os.name!='nt':
+        raise OSError('Explorer selection requires Windows.')
+    item=Path(path).resolve()
+    if not item.exists():
+        raise FileNotFoundError('This file no longer exists: '+str(item))
+    ole=ctypes.windll.ole32
+    shell=ctypes.windll.shell32
+    ole.CoInitialize.argtypes=[ctypes.c_void_p]
+    ole.CoInitialize.restype=ctypes.c_long
+    ole.CoTaskMemFree.argtypes=[ctypes.c_void_p]
+    shell.SHParseDisplayName.argtypes=[ctypes.c_wchar_p,ctypes.c_void_p,ctypes.POINTER(ctypes.c_void_p),wintypes.DWORD,ctypes.POINTER(wintypes.DWORD)]
+    shell.SHParseDisplayName.restype=ctypes.c_long
+    shell.SHOpenFolderAndSelectItems.argtypes=[ctypes.c_void_p,wintypes.UINT,ctypes.c_void_p,wintypes.DWORD]
+    shell.SHOpenFolderAndSelectItems.restype=ctypes.c_long
+    initialized=ole.CoInitialize(None)
+    pidl=ctypes.c_void_p()
+    try:
+        result=shell.SHParseDisplayName(str(item),None,ctypes.byref(pidl),0,None)
+        if result<0:
+            raise OSError('Windows could not locate the item in Explorer.')
+        result=shell.SHOpenFolderAndSelectItems(pidl,0,None,0)
+        if result<0:
+            raise OSError('Windows could not select this item in Explorer.')
+    finally:
+        if pidl.value:
+            ole.CoTaskMemFree(pidl)
+        if initialized>=0:
+            ole.CoUninitialize()
